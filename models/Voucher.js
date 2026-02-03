@@ -1,0 +1,144 @@
+const mongoose = require('mongoose');
+
+const voucherItemSchema = new mongoose.Schema({
+  itemName: {
+    type: String,
+    required: true
+  },
+  pieces: {
+    type: Number,
+    required: true,
+    default: 1
+  },
+  grossWeight: {
+    type: Number,
+    required: true
+  },
+  lessWeight: {
+    type: Number,
+    default: 0
+  },
+  netWeight: {
+    type: Number,
+    required: true
+  },
+  melting: {
+    type: Number,
+    default: 0
+  },
+  wastage: {
+    type: Number,
+    default: 0
+  },
+  fineWeight: {
+    type: Number,
+    required: true
+  },
+  labourRate: {
+    type: Number,
+    default: 0
+  },
+  amount: {
+    type: Number,
+    required: true
+  },
+  metalType: {
+    type: String,
+    enum: ['gold', 'silver'],
+    required: true
+  }
+});
+
+const voucherSchema = new mongoose.Schema({
+  voucherNumber: {
+    type: String,
+    required: true
+  },
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
+  ledgerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Ledger',
+    required: true
+  },
+  customerName: {
+    type: String,
+    required: true
+  },
+  date: {
+    type: Date,
+    required: true,
+    default: Date.now
+  },
+  paymentType: {
+    type: String,
+    enum: ['cash', 'credit'],
+    required: true
+  },
+  goldRate: {
+    type: Number,
+    default: 0
+  },
+  silverRate: {
+    type: Number,
+    default: 0
+  },
+  items: [voucherItemSchema],
+  totals: {
+    pieces: { type: Number, default: 0 },
+    grossWeight: { type: Number, default: 0 },
+    lessWeight: { type: Number, default: 0 },
+    netWeight: { type: Number, default: 0 },
+    melting: { type: Number, default: 0 },
+    wastage: { type: Number, default: 0 },
+    fineWeight: { type: Number, default: 0 },
+    labourRate: { type: Number, default: 0 },
+    amount: { type: Number, default: 0 }
+  },
+  stoneAmount: {
+    type: Number,
+    default: 0
+  },
+  fineAmount: {
+    type: Number,
+    default: 0
+  },
+  issue: {
+    gross: { type: Number, default: 0 }
+  },
+  receipt: {
+    gross: { type: Number, default: 0 }
+  },
+  oldBalance: {
+    amount: { type: Number, default: 0 },
+    fineWeight: { type: Number, default: 0 }
+  },
+  currentBalance: {
+    amount: { type: Number, default: 0 },
+    netWeight: { type: Number, default: 0 }
+  },
+  total: {
+    type: Number,
+    required: true
+  },
+  narration: {
+    type: String,
+    default: ''
+  },
+  creditDueDate: {
+    type: Date
+  }
+}, {
+  timestamps: true
+});
+
+// Index for efficient queries
+voucherSchema.index({ userId: 1, voucherNumber: 1 });
+voucherSchema.index({ userId: 1, ledgerId: 1 });
+voucherSchema.index({ userId: 1, date: -1 });
+voucherSchema.index({ userId: 1, creditDueDate: 1 });
+
+module.exports = mongoose.model('Voucher', voucherSchema);
