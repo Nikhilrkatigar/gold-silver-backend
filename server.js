@@ -1,12 +1,23 @@
-require('dotenv').config();
+if (process.env.NODE_ENV !== 'production') {
+  require('dotenv').config();
+}
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 
 const app = express();
+app.set('trust proxy', 1);
 
-// Middleware
-app.use(cors());
+// ✅ CORS – allow frontend + local dev
+app.use(cors({
+  origin: [
+    'http://localhost:5173',
+    'https://gold-silver-frontend.vercel.app'
+  ],
+  credentials: true
+}));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -20,8 +31,8 @@ app.use('/api/stock', require('./routes/stock'));
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    success: true, 
+  res.json({
+    success: true,
     message: 'Server is running',
     timestamp: new Date().toISOString()
   });
@@ -45,26 +56,25 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Database connection
-const PORT = process.env.PORT || 5000;
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/gold-silver-saas';
+// ✅ ENV validation (important)
+if (!process.env.MONGODB_URI) {
+  throw new Error('MONGODB_URI is not defined');
+}
 
-mongoose.connect(MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-})
+const PORT = process.env.PORT || 5000;
+
+// Database connection
+mongoose.connect(process.env.MONGODB_URI)
   .then(() => {
     console.log('✅ Connected to MongoDB');
-    
-    // Start server
+
     app.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
-      console.log(`📍 API: http://localhost:${PORT}/api`);
-      console.log(`💚 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`🚀 Server running`);
+      console.log(`💚 Environment: ${process.env.NODE_ENV}`);
     });
   })
-  .catch((error) => {
-    console.error('❌ MongoDB connection error:', error);
+  .catch(err => {
+    console.error('❌ MongoDB connection error:', err);
     process.exit(1);
   });
 
