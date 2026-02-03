@@ -22,8 +22,8 @@ const seedAdmin = async () => {
     // Create admin user
     const admin = new User({
       shopName: 'Admin',
-      phoneNumber: 'admin',
-      password: 'admin123',
+      phoneNumber: '8904286980',
+      password: 'Nikhil*9630',
       role: 'admin',
       licenseExpiryDate: new Date('2099-12-31'),
       licenseDays: 999999
@@ -34,8 +34,8 @@ const seedAdmin = async () => {
     console.log('✅ Admin user created successfully!');
     console.log('');
     console.log('Login credentials:');
-    console.log('Phone: admin');
-    console.log('Password: admin123');
+    console.log('Phone: 8904286980');
+    console.log('Password: Nikhil*9630');
     console.log('');
     console.log('⚠️  Please change the password after first login!');
 
