@@ -13,7 +13,8 @@ app.set('trust proxy', 1);
 app.use(cors({
   origin: [
     'http://localhost:5173',
-    'https://gold-silver-frontend.vercel.app'
+    'https://gold-silver-frontend.vercel.app',
+    'https://gold-silver-frontend-red.vercel.app'
   ],
   credentials: true
 }));
