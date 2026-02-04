@@ -14,7 +14,8 @@ app.use(cors({
   origin: [
     'http://localhost:5173',
     'https://gold-silver-frontend.vercel.app',
-    'https://gold-silver-frontend-red.vercel.app'
+    'https://gold-silver-frontend-red.vercel.app',
+    'https://gold-silver-frontend-green.vercel.app'
   ],
   credentials: true
 }));
