@@ -260,4 +260,84 @@ router.delete('/:id/vouchers', async (req, res) => {
   }
 });
 
+// Recalculate ledger balances from all transactions
+router.post('/:id/recalculate-balance', async (req, res) => {
+  try {
+    const ledger = await Ledger.findOne({
+      _id: req.params.id,
+      userId: req.userId
+    });
+
+    if (!ledger) {
+      return res.status(404).json({
+        success: false,
+        message: 'Ledger not found'
+      });
+    }
+
+    // Reset balances
+    ledger.balances = {
+      goldFineWeight: 0,
+      silverFineWeight: 0,
+      amount: 0
+    };
+
+    // Fetch all vouchers for this ledger
+    const vouchers = await Voucher.find({
+      ledgerId: req.params.id,
+      userId: req.userId
+    });
+
+    // Fetch all settlements for this ledger
+    const settlements = await Settlement.find({
+      ledgerId: req.params.id,
+      userId: req.userId
+    });
+
+    // Recalculate from vouchers
+    vouchers.forEach(voucher => {
+      // Always add fine weights from vouchers
+      voucher.items?.forEach(item => {
+        if (item.metalType === 'gold') {
+          ledger.balances.goldFineWeight += item.fineWeight || 0;
+        } else if (item.metalType === 'silver') {
+          ledger.balances.silverFineWeight += item.fineWeight || 0;
+        }
+      });
+
+      // Add amount only from credit vouchers
+      if (voucher.paymentType === 'credit') {
+        ledger.balances.amount += voucher.total || 0;
+      }
+    });
+
+    // Recalculate from settlements
+    settlements.forEach(settlement => {
+      if (settlement.metalType === 'gold') {
+        ledger.balances.goldFineWeight -= settlement.fineGiven || 0;
+      } else if (settlement.metalType === 'silver') {
+        ledger.balances.silverFineWeight -= settlement.fineGiven || 0;
+      }
+      ledger.balances.amount -= settlement.amount || 0;
+    });
+
+    // Set hasVouchers flag
+    ledger.hasVouchers = vouchers.length > 0;
+
+    await ledger.save();
+
+    res.json({
+      success: true,
+      message: 'Ledger balances recalculated successfully',
+      ledger
+    });
+  } catch (error) {
+    console.error('Recalculate balance error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error recalculating balance'
+    });
+  }
+});
+
 module.exports = router;

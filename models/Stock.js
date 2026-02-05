@@ -4,12 +4,13 @@ const stockInputSchema = new mongoose.Schema({
   gold: { type: Number, default: 0 },
   silver: { type: Number, default: 0 },
   date: { type: Date, default: Date.now },
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 });
 
 const StockInput = mongoose.model('StockInput', stockInputSchema);
 
 const stockSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
   gold: { type: Number, default: 0 },
   silver: { type: Number, default: 0 },
   updatedAt: { type: Date, default: Date.now },

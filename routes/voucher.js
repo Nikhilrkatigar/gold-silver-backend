@@ -4,6 +4,7 @@ const Voucher = require('../models/Voucher');
 const Ledger = require('../models/Ledger');
 const User = require('../models/User');
 const { auth, checkLicense } = require('../middleware/auth');
+const { deductFromStock, addBackToStock } = require('./stock');
 
 router.use(auth);
 router.use(checkLicense);
@@ -128,21 +129,35 @@ router.post('/', async (req, res) => {
     await voucher.save();
 
     // Update ledger balances
+    // Always update fine weights regardless of payment type
+    items.forEach(item => {
+      if (item.metalType === 'gold') {
+        ledger.balances.goldFineWeight += item.fineWeight;
+      } else if (item.metalType === 'silver') {
+        ledger.balances.silverFineWeight += item.fineWeight;
+      }
+    });
+
+    // Update amount balance only for credit
     if (paymentType === 'credit') {
       ledger.balances.amount = currentBalance.amount;
-      
-      // Update fine weights based on metal type
-      items.forEach(item => {
-        if (item.metalType === 'gold') {
-          ledger.balances.goldFineWeight += item.fineWeight;
-        } else if (item.metalType === 'silver') {
-          ledger.balances.silverFineWeight += item.fineWeight;
-        }
-      });
     }
     
     ledger.hasVouchers = true;
     await ledger.save();
+
+    // Deduct fine weights from stock for all payment types
+    let goldFineToDeduct = 0;
+    let silverFineToDeduct = 0;
+    items.forEach(item => {
+      if (item.metalType === 'gold') {
+        goldFineToDeduct += item.fineWeight || 0;
+      } else if (item.metalType === 'silver') {
+        silverFineToDeduct += item.fineWeight || 0;
+      }
+    });
+    
+    await deductFromStock(req.userId, goldFineToDeduct, silverFineToDeduct);
 
     res.status(201).json({
       success: true,
@@ -289,17 +304,18 @@ router.delete('/:id', async (req, res) => {
     const ledger = await Ledger.findById(voucher.ledgerId);
 
     if (ledger) {
-      // Reverse balance updates
+      // Always reverse fine weight updates
+      voucher.items.forEach(item => {
+        if (item.metalType === 'gold') {
+          ledger.balances.goldFineWeight -= item.fineWeight;
+        } else if (item.metalType === 'silver') {
+          ledger.balances.silverFineWeight -= item.fineWeight;
+        }
+      });
+
+      // Only reverse amount balance for credit
       if (voucher.paymentType === 'credit') {
         ledger.balances.amount -= voucher.currentBalance.amount;
-        
-        voucher.items.forEach(item => {
-          if (item.metalType === 'gold') {
-            ledger.balances.goldFineWeight -= item.fineWeight;
-          } else if (item.metalType === 'silver') {
-            ledger.balances.silverFineWeight -= item.fineWeight;
-          }
-        });
       }
 
       // Check if ledger still has vouchers
@@ -314,6 +330,19 @@ router.delete('/:id', async (req, res) => {
 
       await ledger.save();
     }
+
+    // Add fine weights back to stock for all payment types
+    let goldFineToAdd = 0;
+    let silverFineToAdd = 0;
+    voucher.items?.forEach(item => {
+      if (item.metalType === 'gold') {
+        goldFineToAdd += item.fineWeight || 0;
+      } else if (item.metalType === 'silver') {
+        silverFineToAdd += item.fineWeight || 0;
+      }
+    });
+    
+    await addBackToStock(req.userId, goldFineToAdd, silverFineToAdd);
 
     await Voucher.findByIdAndDelete(req.params.id);
 

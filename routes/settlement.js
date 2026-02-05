@@ -3,6 +3,7 @@ const router = express.Router();
 const Settlement = require('../models/Settlement');
 const Ledger = require('../models/Ledger');
 const { auth, checkLicense } = require('../middleware/auth');
+const { deductFromStock, addBackToStock } = require('./stock');
 
 router.use(auth);
 router.use(checkLicense);
@@ -44,12 +45,16 @@ router.post('/', async (req, res) => {
       ? ledger.balances.goldFineWeight 
       : ledger.balances.silverFineWeight;
 
-    if (balanceBefore < fineGiven) {
+    // Check balance only for positive settlements
+    if (fineGiven > 0 && balanceBefore < fineGiven) {
       return res.status(400).json({
         success: false,
         message: 'Insufficient balance for settlement'
       });
     }
+
+    // For negative settlements, allow any value (represents reversal/adjustment)
+    // No additional validation needed
 
     // Calculate amount
     const amount = fineGiven * metalRate;
@@ -84,6 +89,13 @@ router.post('/', async (req, res) => {
     }
 
     await ledger.save();
+
+    // Deduct fine given from stock
+    if (metalType === 'gold') {
+      await deductFromStock(req.userId, fineGiven, 0);
+    } else {
+      await deductFromStock(req.userId, 0, fineGiven);
+    }
 
     res.status(201).json({
       success: true,
@@ -188,6 +200,13 @@ router.delete('/:id', async (req, res) => {
       }
 
       await ledger.save();
+    }
+
+    // Add fine given back to stock
+    if (settlement.metalType === 'gold') {
+      await addBackToStock(req.userId, settlement.fineGiven, 0);
+    } else {
+      await addBackToStock(req.userId, 0, settlement.fineGiven);
     }
 
     await Settlement.findByIdAndDelete(req.params.id);

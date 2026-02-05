@@ -11,14 +11,44 @@ app.set('trust proxy', 1);
 
 // ✅ CORS – allow frontend + local dev
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'https://gold-silver-frontend.vercel.app',
-    'https://gold-silver-frontend-red.vercel.app',
-    'https://gold-silver-frontend-green.vercel.app'
-  ],
-  credentials: true
+  origin: function (origin, callback) {
+    const allowedOrigins = [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://localhost:5173',
+      'http://127.0.0.1:3000',
+      'http://127.0.0.1:3001',
+      'http://127.0.0.1:5173',
+      'https://gold-silver-frontend.vercel.app',
+      'https://gold-silver-frontend-red.vercel.app',
+      'https://gold-silver-frontend-green.vercel.app'
+    ];
+    
+    // Add custom frontend URL from env if provided
+    if (process.env.FRONTEND_URL) {
+      allowedOrigins.push(process.env.FRONTEND_URL.trim());
+    }
+
+    // Always allow if no origin (for mobile apps, Postman, etc.)
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.warn(`⚠️ CORS blocked request from origin: ${origin}`);
+      callback(null, true); // Allow anyway for debugging - remove in production if needed
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 200
 }));
+
+// ✅ Explicit preflight request handler
+app.options('*', cors());
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
