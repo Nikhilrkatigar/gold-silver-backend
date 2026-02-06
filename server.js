@@ -60,6 +60,7 @@ app.use('/api/ledger', require('./routes/ledger'));
 app.use('/api/voucher', require('./routes/voucher'));
 app.use('/api/settlement', require('./routes/settlement'));
 app.use('/api/stock', require('./routes/stock'));
+app.use('/api/karigar', require('./routes/karigar'));
 
 // Health check
 app.get('/api/health', (req, res) => {
