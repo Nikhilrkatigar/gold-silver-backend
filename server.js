@@ -19,6 +19,7 @@ app.use(cors({
       'http://127.0.0.1:3000',
       'http://127.0.0.1:3001',
       'http://127.0.0.1:5173',
+      'http://192.168.29.11:3000',
       'https://gold-silver-frontend.vercel.app',
       'https://gold-silver-frontend-red.vercel.app',
       'https://gold-silver-frontend-green.vercel.app'
