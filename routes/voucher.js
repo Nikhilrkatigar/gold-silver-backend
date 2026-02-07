@@ -24,7 +24,8 @@ router.post('/', async (req, res) => {
       issue,
       receipt,
       narration,
-      voucherNumber
+      voucherNumber,
+      cashReceived
     } = req.body;
 
     // Validate required fields
@@ -86,7 +87,7 @@ router.post('/', async (req, res) => {
 
     // Calculate old balance
     const oldBalance = {
-      amount: ledger.balances.amount || 0,
+      amount: paymentType === 'cash' ? (ledger.balances.cashBalance || 0) : (ledger.balances.creditBalance || 0),
       fineWeight: (ledger.balances.goldFineWeight || 0) + (ledger.balances.silverFineWeight || 0)
     };
 
@@ -101,6 +102,11 @@ router.post('/', async (req, res) => {
 
     if (paymentType === 'credit') {
       currentBalance.amount = oldBalance.amount + total;
+    } else if (paymentType === 'cash') {
+      // For cash bills, calculate if there's a shortfall
+      const finalCashReceived = cashReceived || 0;
+      const shortfall = Math.max(0, total - finalCashReceived);
+      currentBalance.amount = (oldBalance.amount || 0) + shortfall;
     }
 
     // Create voucher
@@ -122,6 +128,7 @@ router.post('/', async (req, res) => {
       oldBalance,
       currentBalance,
       total,
+      cashReceived: cashReceived || 0,
       narration: narration || '',
       creditDueDate: paymentType === 'credit' ? new Date(Date.now() + 5 * 24 * 60 * 60 * 1000) : null
     });
@@ -129,35 +136,45 @@ router.post('/', async (req, res) => {
     await voucher.save();
 
     // Update ledger balances
-    // Always update fine weights regardless of payment type
-    items.forEach(item => {
-      if (item.metalType === 'gold') {
-        ledger.balances.goldFineWeight += item.fineWeight;
-      } else if (item.metalType === 'silver') {
-        ledger.balances.silverFineWeight += item.fineWeight;
-      }
-    });
-
-    // Update amount balance only for credit
+    // Only update fine weights for CREDIT bills, not cash bills
+    console.log('🔍 DEBUG - Payment Type:', paymentType, 'Items:', items.map(i => ({ name: i.itemName, metalType: i.metalType, fineWeight: i.fineWeight })));
     if (paymentType === 'credit') {
-      ledger.balances.amount = currentBalance.amount;
+      items.forEach(item => {
+        if (item.metalType === 'gold') {
+          ledger.balances.goldFineWeight += item.fineWeight;
+        } else if (item.metalType === 'silver') {
+          ledger.balances.silverFineWeight += item.fineWeight;
+        }
+      });
+    }
+
+    // Update amount balance based on payment type
+    if (paymentType === 'credit') {
+      ledger.balances.creditBalance = currentBalance.amount;
+      ledger.balances.amount = currentBalance.amount; // Keep for backward compatibility
+    } else if (paymentType === 'cash') {
+      ledger.balances.cashBalance = currentBalance.amount;
+      ledger.balances.amount = currentBalance.amount; // Keep for backward compatibility
     }
     
     ledger.hasVouchers = true;
     await ledger.save();
 
-    // Deduct fine weights from stock for all payment types
+    // Deduct fine weights from stock only for CREDIT bills, not cash bills
     let goldFineToDeduct = 0;
     let silverFineToDeduct = 0;
-    items.forEach(item => {
-      if (item.metalType === 'gold') {
-        goldFineToDeduct += item.fineWeight || 0;
-      } else if (item.metalType === 'silver') {
-        silverFineToDeduct += item.fineWeight || 0;
-      }
-    });
     
-    await deductFromStock(req.userId, goldFineToDeduct, silverFineToDeduct);
+    if (paymentType === 'credit') {
+      items.forEach(item => {
+        if (item.metalType === 'gold') {
+          goldFineToDeduct += item.fineWeight || 0;
+        } else if (item.metalType === 'silver') {
+          silverFineToDeduct += item.fineWeight || 0;
+        }
+      });
+      
+      await deductFromStock(req.userId, goldFineToDeduct, silverFineToDeduct);
+    }
 
     res.status(201).json({
       success: true,
@@ -304,14 +321,16 @@ router.delete('/:id', async (req, res) => {
     const ledger = await Ledger.findById(voucher.ledgerId);
 
     if (ledger) {
-      // Always reverse fine weight updates
-      voucher.items.forEach(item => {
-        if (item.metalType === 'gold') {
-          ledger.balances.goldFineWeight -= item.fineWeight;
-        } else if (item.metalType === 'silver') {
-          ledger.balances.silverFineWeight -= item.fineWeight;
-        }
-      });
+      // Only reverse fine weight updates for CREDIT vouchers
+      if (voucher.paymentType === 'credit') {
+        voucher.items.forEach(item => {
+          if (item.metalType === 'gold') {
+            ledger.balances.goldFineWeight -= item.fineWeight;
+          } else if (item.metalType === 'silver') {
+            ledger.balances.silverFineWeight -= item.fineWeight;
+          }
+        });
+      }
 
       // Only reverse amount balance for credit
       if (voucher.paymentType === 'credit') {
@@ -331,18 +350,20 @@ router.delete('/:id', async (req, res) => {
       await ledger.save();
     }
 
-    // Add fine weights back to stock for all payment types
+    // Add fine weights back to stock only for CREDIT vouchers
     let goldFineToAdd = 0;
     let silverFineToAdd = 0;
-    voucher.items?.forEach(item => {
-      if (item.metalType === 'gold') {
-        goldFineToAdd += item.fineWeight || 0;
-      } else if (item.metalType === 'silver') {
-        silverFineToAdd += item.fineWeight || 0;
-      }
-    });
-    
-    await addBackToStock(req.userId, goldFineToAdd, silverFineToAdd);
+    if (voucher.paymentType === 'credit') {
+      voucher.items?.forEach(item => {
+        if (item.metalType === 'gold') {
+          goldFineToAdd += item.fineWeight || 0;
+        } else if (item.metalType === 'silver') {
+          silverFineToAdd += item.fineWeight || 0;
+        }
+      });
+      
+      await addBackToStock(req.userId, goldFineToAdd, silverFineToAdd);
+    }
 
     await Voucher.findByIdAndDelete(req.params.id);
 

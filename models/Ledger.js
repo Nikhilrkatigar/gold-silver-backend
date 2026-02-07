@@ -28,6 +28,14 @@ const ledgerSchema = new mongoose.Schema({
     amount: {
       type: Number,
       default: 0
+    },
+    cashBalance: {
+      type: Number,
+      default: 0
+    },
+    creditBalance: {
+      type: Number,
+      default: 0
     }
   },
   hasVouchers: {

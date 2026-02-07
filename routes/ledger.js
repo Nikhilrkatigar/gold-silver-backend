@@ -296,14 +296,16 @@ router.post('/:id/recalculate-balance', async (req, res) => {
 
     // Recalculate from vouchers
     vouchers.forEach(voucher => {
-      // Always add fine weights from vouchers
-      voucher.items?.forEach(item => {
-        if (item.metalType === 'gold') {
-          ledger.balances.goldFineWeight += item.fineWeight || 0;
-        } else if (item.metalType === 'silver') {
-          ledger.balances.silverFineWeight += item.fineWeight || 0;
-        }
-      });
+      // Only add fine weights from CREDIT vouchers, not cash vouchers
+      if (voucher.paymentType === 'credit') {
+        voucher.items?.forEach(item => {
+          if (item.metalType === 'gold') {
+            ledger.balances.goldFineWeight += item.fineWeight || 0;
+          } else if (item.metalType === 'silver') {
+            ledger.balances.silverFineWeight += item.fineWeight || 0;
+          }
+        });
+      }
 
       // Add amount only from credit vouchers
       if (voucher.paymentType === 'credit') {
