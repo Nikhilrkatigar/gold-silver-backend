@@ -4,10 +4,14 @@ const Karigar = require('../models/Karigar');
 const { auth, checkLicense } = require('../middleware/auth');
 const { deductFromStock, addBackToStock } = require('./stock');
 
+const toNumber = (value, fallback = 0) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+};
+
 router.use(auth);
 router.use(checkLicense);
 
-// Create karigar transaction
 router.post('/', async (req, res) => {
   try {
     const {
@@ -15,15 +19,16 @@ router.post('/', async (req, res) => {
       type,
       itemName,
       metalType,
-      fineWeight,
-      chargeAmount,
       narration
     } = req.body;
 
-    if (!type || !itemName || !metalType || fineWeight === undefined) {
+    const fineWeight = toNumber(req.body.fineWeight);
+    const chargeAmount = Math.max(0, toNumber(req.body.chargeAmount));
+
+    if (!type || !itemName || !metalType) {
       return res.status(400).json({
         success: false,
-        message: 'All required fields must be provided'
+        message: 'type, itemName and metalType are required'
       });
     }
 
@@ -34,52 +39,53 @@ router.post('/', async (req, res) => {
       });
     }
 
+    if (!['gold', 'silver'].includes(metalType)) {
+      return res.status(400).json({
+        success: false,
+        message: 'metalType must be either "gold" or "silver"'
+      });
+    }
+
+    if (fineWeight <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'fineWeight must be greater than 0'
+      });
+    }
+
+    if (type === 'given') {
+      await deductFromStock(req.userId, metalType === 'gold' ? fineWeight : 0, metalType === 'silver' ? fineWeight : 0);
+    } else {
+      await addBackToStock(req.userId, metalType === 'gold' ? fineWeight : 0, metalType === 'silver' ? fineWeight : 0);
+    }
+
     const transaction = new Karigar({
       userId: req.userId,
       date: date || new Date(),
       type,
-      itemName,
+      itemName: String(itemName).trim().toLowerCase(),
       metalType,
-      fineWeight: parseFloat(fineWeight),
-      chargeAmount: parseFloat(chargeAmount) || 0,
+      fineWeight,
+      chargeAmount,
       narration: narration || ''
     });
 
     await transaction.save();
 
-    // Update stock based on transaction type
-    if (type === 'given') {
-      // Given means minus from stock
-      if (metalType === 'gold') {
-        await deductFromStock(req.userId, fineWeight, 0);
-      } else {
-        await deductFromStock(req.userId, 0, fineWeight);
-      }
-    } else {
-      // Received means add to stock
-      if (metalType === 'gold') {
-        await addBackToStock(req.userId, fineWeight, 0);
-      } else {
-        await addBackToStock(req.userId, 0, fineWeight);
-      }
-    }
-
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: 'Transaction created successfully',
       transaction
     });
   } catch (error) {
     console.error('Error creating karigar transaction:', error);
-    res.status(500).json({
+    return res.status(error.status || 500).json({
       success: false,
-      message: 'Failed to create transaction',
-      error: error.message
+      message: error.message || 'Failed to create transaction'
     });
   }
 });
 
-// Get all karigar transactions (excluding deleted)
 router.get('/', async (req, res) => {
   try {
     const transactions = await Karigar.find({
@@ -87,21 +93,19 @@ router.get('/', async (req, res) => {
       isDeleted: false
     }).sort({ date: -1 });
 
-    res.json({
+    return res.json({
       success: true,
       transactions
     });
   } catch (error) {
     console.error('Error fetching karigar transactions:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: 'Failed to fetch transactions',
-      error: error.message
+      message: 'Failed to fetch transactions'
     });
   }
 });
 
-// Get single karigar transaction
 router.get('/:id', async (req, res) => {
   try {
     const transaction = await Karigar.findOne({
@@ -116,21 +120,19 @@ router.get('/:id', async (req, res) => {
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
       transaction
     });
   } catch (error) {
     console.error('Error fetching karigar transaction:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: 'Failed to fetch transaction',
-      error: error.message
+      message: 'Failed to fetch transaction'
     });
   }
 });
 
-// Delete karigar transaction (reverse stock changes)
 router.delete('/:id', async (req, res) => {
   try {
     const transaction = await Karigar.findOne({
@@ -145,37 +147,39 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
-    // Reverse the stock changes
-    if (transaction.type === 'given') {
-      // If transaction was "given" (stock was deducted), add it back
-      if (transaction.metalType === 'gold') {
-        await addBackToStock(req.userId, transaction.fineWeight, 0);
-      } else {
-        await addBackToStock(req.userId, 0, transaction.fineWeight);
-      }
-    } else {
-      // If transaction was "received" (stock was added), deduct it
-      if (transaction.metalType === 'gold') {
-        await deductFromStock(req.userId, transaction.fineWeight, 0);
-      } else {
-        await deductFromStock(req.userId, 0, transaction.fineWeight);
-      }
+    if (transaction.isDeleted) {
+      return res.status(400).json({
+        success: false,
+        message: 'Transaction already deleted'
+      });
     }
 
-    // Mark as deleted
+    if (transaction.type === 'given') {
+      await addBackToStock(
+        req.userId,
+        transaction.metalType === 'gold' ? transaction.fineWeight : 0,
+        transaction.metalType === 'silver' ? transaction.fineWeight : 0
+      );
+    } else {
+      await deductFromStock(
+        req.userId,
+        transaction.metalType === 'gold' ? transaction.fineWeight : 0,
+        transaction.metalType === 'silver' ? transaction.fineWeight : 0
+      );
+    }
+
     transaction.isDeleted = true;
     await transaction.save();
 
-    res.json({
+    return res.json({
       success: true,
       message: 'Transaction deleted successfully and stock reversed'
     });
   } catch (error) {
     console.error('Error deleting karigar transaction:', error);
-    res.status(500).json({
+    return res.status(error.status || 500).json({
       success: false,
-      message: 'Failed to delete transaction',
-      error: error.message
+      message: error.message || 'Failed to delete transaction'
     });
   }
 });

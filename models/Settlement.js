@@ -54,6 +54,13 @@ const settlementSchema = new mongoose.Schema({
   narration: {
     type: String,
     default: ''
+  },
+  direction: {
+    type: String,
+    enum: ['receipt', 'payment'],
+    required: true,
+    default: 'payment',
+    description: 'receipt = customer gave fine, payment = customer took fine'
   }
 }, {
   timestamps: true

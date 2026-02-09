@@ -1,113 +1,187 @@
 const express = require('express');
 const router = express.Router();
 const { Stock, StockInput } = require('../models/Stock');
-const { auth, isAdmin } = require('../middleware/auth');
+const { auth, checkLicense } = require('../middleware/auth');
+const CONSTANTS = require('../utils/constants');
+
+const createError = (status, message, code) => {
+  const error = new Error(message);
+  error.status = status;
+  error.code = code;
+  return error;
+};
+
+const toNumber = (value, fieldName) => {
+  const number = Number(value ?? 0);
+  if (!Number.isFinite(number)) {
+    throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, `Invalid ${fieldName} value`, 'INVALID_NUMBER');
+  }
+  return number;
+};
+
+const ensureUserStock = async (userId) => {
+  let stock = await Stock.findOne({ userId });
+  if (!stock) {
+    stock = await Stock.create({ userId, gold: 0, silver: 0 });
+  }
+  return stock;
+};
 
 // All stock routes require authentication and valid license
-const { checkLicense } = require('../middleware/auth');
 router.use(auth);
 router.use(checkLicense);
 
 // Get current stock for user
 router.get('/', async (req, res) => {
   try {
-    let stock = await Stock.findOne({ userId: req.userId });
-    if (!stock) {
-      stock = await Stock.create({ userId: req.userId, gold: 0, silver: 0 });
-    }
+    const stock = await ensureUserStock(req.userId);
     res.json({ success: true, stock });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error fetching stock', error });
+    res.status(error.status || CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
+      success: false,
+      message: error.message || 'Error fetching stock'
+    });
   }
 });
 
 // Add stock for user
 router.post('/add', async (req, res) => {
   try {
-    const { gold = 0, silver = 0 } = req.body;
-    let stock = await Stock.findOne({ userId: req.userId });
-    if (!stock) {
-      stock = await Stock.create({ userId: req.userId, gold: 0, silver: 0 });
+    const gold = toNumber(req.body.gold, 'gold');
+    const silver = toNumber(req.body.silver, 'silver');
+
+    if (gold < 0 || silver < 0) {
+      throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, 'Stock amounts cannot be negative', 'INVALID_STOCK');
     }
-    stock.gold += Number(gold);
-    stock.silver += Number(silver);
+
+    const stock = await ensureUserStock(req.userId);
+    stock.gold += gold;
+    stock.silver += silver;
     stock.updatedAt = new Date();
     await stock.save();
-    await StockInput.create({ gold, silver, userId: req.userId });
+
+    await StockInput.create({
+      userId: req.userId,
+      gold,
+      silver
+    });
+
     res.json({ success: true, stock });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error adding stock', error });
+    res.status(error.status || CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
+      success: false,
+      message: error.message || 'Error adding stock'
+    });
   }
 });
 
 // Get stock input history for user
 router.get('/history', async (req, res) => {
   try {
-    const history = await StockInput.find({ userId: req.userId }).sort({ date: -1 });
-    res.json({ success: true, history });
+    const page = Math.max(1, parseInt(req.query.page, 10) || CONSTANTS.PAGINATION.DEFAULT_PAGE);
+    const limit = Math.min(
+      parseInt(req.query.limit, 10) || CONSTANTS.PAGINATION.DEFAULT_LIMIT,
+      CONSTANTS.PAGINATION.MAX_LIMIT
+    );
+    const skip = (page - 1) * limit;
+
+    const history = await StockInput.find({ userId: req.userId })
+      .sort({ date: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await StockInput.countDocuments({ userId: req.userId });
+
+    res.json({
+      success: true,
+      history,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error fetching history', error });
+    res.status(error.status || CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
+      success: false,
+      message: error.message || 'Error fetching history'
+    });
   }
 });
 
 // Undo last stock input for user
 router.post('/undo', async (req, res) => {
   try {
-    // Find the last stock input for this user
     const lastInput = await StockInput.findOne({ userId: req.userId }).sort({ date: -1 });
     if (!lastInput) {
-      return res.status(404).json({ success: false, message: 'No stock input to undo.' });
+      throw createError(CONSTANTS.HTTP_STATUS.NOT_FOUND, 'No stock input to undo.', 'NO_STOCK_INPUT');
     }
-    // Subtract the last input from the stock
-    let stock = await Stock.findOne({ userId: req.userId });
-    if (!stock) {
-      return res.status(404).json({ success: false, message: 'No stock record found.' });
+
+    const stock = await ensureUserStock(req.userId);
+    const updatedGold = stock.gold - Number(lastInput.gold || 0);
+    const updatedSilver = stock.silver - Number(lastInput.silver || 0);
+
+    if (updatedGold < CONSTANTS.STOCK.MIN_ALLOWED || updatedSilver < CONSTANTS.STOCK.MIN_ALLOWED) {
+      throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, CONSTANTS.ERROR_MESSAGES.INSUFFICIENT_STOCK, 'INSUFFICIENT_STOCK');
     }
-    stock.gold -= Number(lastInput.gold);
-    stock.silver -= Number(lastInput.silver);
+
+    stock.gold = updatedGold;
+    stock.silver = updatedSilver;
     stock.updatedAt = new Date();
     await stock.save();
-    // Remove the last input
     await lastInput.deleteOne();
+
     res.json({ success: true, stock });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error undoing last stock input', error });
+    res.status(error.status || CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
+      success: false,
+      message: error.message || 'Error undoing last stock input'
+    });
   }
 });
 
-// Utility functions for automatic stock deduction (called from voucher/settlement routes)
+// Utility functions for automatic stock deduction/addition (used by other routes)
 const deductFromStock = async (userId, goldFineWeight = 0, silverFineWeight = 0) => {
-  try {
-    let stock = await Stock.findOne({ userId });
-    if (!stock) {
-      stock = await Stock.create({ userId, gold: 0, silver: 0 });
-    }
-    stock.gold -= Number(goldFineWeight);
-    stock.silver -= Number(silverFineWeight);
-    stock.updatedAt = new Date();
-    await stock.save();
-    return stock;
-  } catch (error) {
-    console.error('Error deducting from stock:', error);
-    return null;
+  const gold = toNumber(goldFineWeight, 'gold fine weight');
+  const silver = toNumber(silverFineWeight, 'silver fine weight');
+
+  if (gold < 0 || silver < 0) {
+    throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, 'Stock deduction values cannot be negative', 'INVALID_STOCK');
   }
+
+  const stock = await ensureUserStock(userId);
+
+  if (
+    stock.gold - gold < CONSTANTS.STOCK.MIN_ALLOWED ||
+    stock.silver - silver < CONSTANTS.STOCK.MIN_ALLOWED
+  ) {
+    throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, CONSTANTS.ERROR_MESSAGES.INSUFFICIENT_STOCK, 'INSUFFICIENT_STOCK');
+  }
+
+  stock.gold -= gold;
+  stock.silver -= silver;
+  stock.updatedAt = new Date();
+  await stock.save();
+
+  return stock;
 };
 
 const addBackToStock = async (userId, goldFineWeight = 0, silverFineWeight = 0) => {
-  try {
-    let stock = await Stock.findOne({ userId });
-    if (!stock) {
-      stock = await Stock.create({ userId, gold: 0, silver: 0 });
-    }
-    stock.gold += Number(goldFineWeight);
-    stock.silver += Number(silverFineWeight);
-    stock.updatedAt = new Date();
-    await stock.save();
-    return stock;
-  } catch (error) {
-    console.error('Error adding back to stock:', error);
-    return null;
+  const gold = toNumber(goldFineWeight, 'gold fine weight');
+  const silver = toNumber(silverFineWeight, 'silver fine weight');
+
+  if (gold < 0 || silver < 0) {
+    throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, 'Stock add-back values cannot be negative', 'INVALID_STOCK');
   }
+
+  const stock = await ensureUserStock(userId);
+  stock.gold += gold;
+  stock.silver += silver;
+  stock.updatedAt = new Date();
+  await stock.save();
+
+  return stock;
 };
 
 module.exports = router;

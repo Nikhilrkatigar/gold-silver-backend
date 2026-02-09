@@ -5,13 +5,28 @@ const Voucher = require('../models/Voucher');
 const Settlement = require('../models/Settlement');
 const { auth, checkLicense } = require('../middleware/auth');
 
+const sanitizePhone = (phone) => String(phone || '').replace(/\D/g, '');
+const toNumber = (value) => Number(value || 0);
+
+const calculateUnifiedAmount = (balances) => (
+  toNumber(balances.creditBalance) + toNumber(balances.cashBalance)
+);
+
+const resetBalances = () => ({
+  goldFineWeight: 0,
+  silverFineWeight: 0,
+  amount: 0,
+  cashBalance: 0,
+  creditBalance: 0
+});
+
 router.use(auth);
 router.use(checkLicense);
 
-// Create ledger
 router.post('/', async (req, res) => {
   try {
-    const { name, phoneNumber } = req.body;
+    const { name, gstDetails } = req.body;
+    const phoneNumber = sanitizePhone(req.body.phoneNumber);
 
     if (!name || !phoneNumber) {
       return res.status(400).json({
@@ -20,48 +35,58 @@ router.post('/', async (req, res) => {
       });
     }
 
+    if (!/^[0-9]{10}$/.test(phoneNumber)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Phone number must be 10 digits'
+      });
+    }
+
     const ledger = new Ledger({
-      name,
+      name: name.trim(),
       phoneNumber,
-      userId: req.userId
+      userId: req.userId,
+      ...(gstDetails && {
+        gstDetails: {
+          hasGST: !!gstDetails.hasGST,
+          gstNumber: gstDetails.gstNumber || undefined,
+          stateCode: gstDetails.stateCode || undefined
+        }
+      })
     });
 
     await ledger.save();
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: 'Ledger created successfully',
       ledger
     });
   } catch (error) {
     console.error('Create ledger error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error creating ledger'
     });
   }
 });
 
-// Get all ledgers for user
 router.get('/', async (req, res) => {
   try {
-    const ledgers = await Ledger.find({ userId: req.userId })
-      .sort({ name: 1 });
-
-    res.json({
+    const ledgers = await Ledger.find({ userId: req.userId }).sort({ name: 1 });
+    return res.json({
       success: true,
       ledgers
     });
   } catch (error) {
     console.error('Get ledgers error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error fetching ledgers'
     });
   }
 });
 
-// Get single ledger
 router.get('/:id', async (req, res) => {
   try {
     const ledger = await Ledger.findOne({
@@ -76,24 +101,23 @@ router.get('/:id', async (req, res) => {
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
       ledger
     });
   } catch (error) {
     console.error('Get ledger error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error fetching ledger'
     });
   }
 });
 
-// Get ledger with transactions
 router.get('/:id/transactions', async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
-    
+
     const ledger = await Ledger.findOne({
       _id: req.params.id,
       userId: req.userId
@@ -114,40 +138,60 @@ router.get('/:id/transactions', async (req, res) => {
     if (startDate || endDate) {
       query.date = {};
       if (startDate) query.date.$gte = new Date(startDate);
-      if (endDate) query.date.$lte = new Date(endDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        query.date.$lte = end;
+      }
     }
 
     const vouchers = await Voucher.find(query).sort({ date: -1 });
     const settlements = await Settlement.find(query).sort({ date: -1 });
 
-    // Combine and sort by date
     const transactions = [
-      ...vouchers.map(v => ({ ...v.toObject(), type: 'voucher' })),
-      ...settlements.map(s => ({ ...s.toObject(), type: 'settlement' }))
+      ...vouchers.map((v) => ({ ...v.toObject(), type: 'voucher' })),
+      ...settlements.map((s) => ({ ...s.toObject(), type: 'settlement' }))
     ].sort((a, b) => new Date(b.date) - new Date(a.date));
 
-    res.json({
+    return res.json({
       success: true,
       ledger,
       transactions
     });
   } catch (error) {
     console.error('Get transactions error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error fetching transactions'
     });
   }
 });
 
-// Update ledger
 router.patch('/:id', async (req, res) => {
   try {
-    const { name, phoneNumber } = req.body;
     const updates = {};
+    const { name, gstDetails } = req.body;
+    const phoneNumber = req.body.phoneNumber ? sanitizePhone(req.body.phoneNumber) : undefined;
 
-    if (name) updates.name = name;
-    if (phoneNumber) updates.phoneNumber = phoneNumber;
+    if (name !== undefined) updates.name = name.trim();
+
+    if (phoneNumber !== undefined) {
+      if (!/^[0-9]{10}$/.test(phoneNumber)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Phone number must be 10 digits'
+        });
+      }
+      updates.phoneNumber = phoneNumber;
+    }
+
+    if (gstDetails) {
+      updates.gstDetails = {
+        hasGST: !!gstDetails.hasGST,
+        gstNumber: gstDetails.gstNumber || undefined,
+        stateCode: gstDetails.stateCode || undefined
+      };
+    }
 
     const ledger = await Ledger.findOneAndUpdate(
       { _id: req.params.id, userId: req.userId },
@@ -162,21 +206,20 @@ router.patch('/:id', async (req, res) => {
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
       message: 'Ledger updated successfully',
       ledger
     });
   } catch (error) {
     console.error('Update ledger error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error updating ledger'
     });
   }
 });
 
-// Delete ledger
 router.delete('/:id', async (req, res) => {
   try {
     const ledger = await Ledger.findOne({
@@ -191,29 +234,33 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
-    if (ledger.hasVouchers) {
+    const [voucherCount, settlementCount] = await Promise.all([
+      Voucher.countDocuments({ userId: req.userId, ledgerId: req.params.id }),
+      Settlement.countDocuments({ userId: req.userId, ledgerId: req.params.id })
+    ]);
+
+    if (voucherCount > 0 || settlementCount > 0) {
       return res.status(400).json({
         success: false,
-        message: 'Cannot delete ledger with existing vouchers. Please delete vouchers first.'
+        message: 'Cannot delete ledger with transactions. Delete vouchers/settlements first.'
       });
     }
 
     await Ledger.findByIdAndDelete(req.params.id);
 
-    res.json({
+    return res.json({
       success: true,
       message: 'Ledger deleted successfully'
     });
   } catch (error) {
     console.error('Delete ledger error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error deleting ledger'
     });
   }
 });
 
-// Delete all vouchers for a ledger
 router.delete('/:id/vouchers', async (req, res) => {
   try {
     const ledger = await Ledger.findOne({
@@ -228,39 +275,28 @@ router.delete('/:id/vouchers', async (req, res) => {
       });
     }
 
-    await Voucher.deleteMany({
-      userId: req.userId,
-      ledgerId: req.params.id
-    });
+    await Promise.all([
+      Voucher.deleteMany({ userId: req.userId, ledgerId: req.params.id }),
+      Settlement.deleteMany({ userId: req.userId, ledgerId: req.params.id })
+    ]);
 
-    await Settlement.deleteMany({
-      userId: req.userId,
-      ledgerId: req.params.id
-    });
-
-    // Reset balances
-    ledger.balances = {
-      goldFineWeight: 0,
-      silverFineWeight: 0,
-      amount: 0
-    };
+    ledger.balances = resetBalances();
     ledger.hasVouchers = false;
     await ledger.save();
 
-    res.json({
+    return res.json({
       success: true,
-      message: 'All vouchers deleted successfully'
+      message: 'All vouchers and settlements deleted successfully'
     });
   } catch (error) {
     console.error('Delete vouchers error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error deleting vouchers'
     });
   }
 });
 
-// Recalculate ledger balances from all transactions
 router.post('/:id/recalculate-balance', async (req, res) => {
   try {
     const ledger = await Ledger.findOne({
@@ -275,67 +311,64 @@ router.post('/:id/recalculate-balance', async (req, res) => {
       });
     }
 
-    // Reset balances
-    ledger.balances = {
-      goldFineWeight: 0,
-      silverFineWeight: 0,
-      amount: 0
-    };
+    ledger.balances = resetBalances();
 
-    // Fetch all vouchers for this ledger
-    const vouchers = await Voucher.find({
-      ledgerId: req.params.id,
-      userId: req.userId
-    });
+    const [vouchers, settlements] = await Promise.all([
+      Voucher.find({
+        ledgerId: req.params.id,
+        userId: req.userId,
+        status: 'active'
+      }),
+      Settlement.find({
+        ledgerId: req.params.id,
+        userId: req.userId
+      })
+    ]);
 
-    // Fetch all settlements for this ledger
-    const settlements = await Settlement.find({
-      ledgerId: req.params.id,
-      userId: req.userId
-    });
-
-    // Recalculate from vouchers
-    vouchers.forEach(voucher => {
-      // Only add fine weights from CREDIT vouchers, not cash vouchers
+    vouchers.forEach((voucher) => {
       if (voucher.paymentType === 'credit') {
-        voucher.items?.forEach(item => {
+        voucher.items?.forEach((item) => {
           if (item.metalType === 'gold') {
-            ledger.balances.goldFineWeight += item.fineWeight || 0;
+            ledger.balances.goldFineWeight += toNumber(item.fineWeight);
           } else if (item.metalType === 'silver') {
-            ledger.balances.silverFineWeight += item.fineWeight || 0;
+            ledger.balances.silverFineWeight += toNumber(item.fineWeight);
           }
         });
-      }
-
-      // Add amount only from credit vouchers
-      if (voucher.paymentType === 'credit') {
-        ledger.balances.amount += voucher.total || 0;
+        ledger.balances.creditBalance += toNumber(voucher.total);
+      } else if (voucher.paymentType === 'cash') {
+        const shortfall = Math.max(0, toNumber(voucher.total) - toNumber(voucher.cashReceived));
+        ledger.balances.cashBalance += shortfall;
       }
     });
 
-    // Recalculate from settlements
-    settlements.forEach(settlement => {
+    settlements.forEach((settlement) => {
+      const fine = toNumber(settlement.fineGiven);
+      const amount = toNumber(settlement.amount);
+      const direction = settlement.direction || 'payment';
+      const multiplier = direction === 'receipt' ? 1 : -1;
+
       if (settlement.metalType === 'gold') {
-        ledger.balances.goldFineWeight -= settlement.fineGiven || 0;
+        ledger.balances.goldFineWeight += multiplier * fine;
       } else if (settlement.metalType === 'silver') {
-        ledger.balances.silverFineWeight -= settlement.fineGiven || 0;
+        ledger.balances.silverFineWeight += multiplier * fine;
       }
-      ledger.balances.amount -= settlement.amount || 0;
+
+      ledger.balances.creditBalance += multiplier * amount;
     });
 
-    // Set hasVouchers flag
+    ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
     ledger.hasVouchers = vouchers.length > 0;
 
     await ledger.save();
 
-    res.json({
+    return res.json({
       success: true,
       message: 'Ledger balances recalculated successfully',
       ledger
     });
   } catch (error) {
     console.error('Recalculate balance error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error recalculating balance'
     });

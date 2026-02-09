@@ -5,34 +5,54 @@ const Ledger = require('../models/Ledger');
 const { auth, checkLicense } = require('../middleware/auth');
 const { deductFromStock, addBackToStock } = require('./stock');
 
+const toNumber = (value, fallback = 0) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+};
+
+const calculateUnifiedAmount = (balances) => (
+  toNumber(balances.creditBalance) + toNumber(balances.cashBalance)
+);
+
 router.use(auth);
 router.use(checkLicense);
 
-// Create settlement
 router.post('/', async (req, res) => {
+  let stockAdjusted = false;
+  let stockAction = null;
+  let fineGiven = 0;
+
   try {
     const {
       ledgerId,
       metalType,
       metalRate,
-      fineGiven,
       narration,
-      date
+      date,
+      direction = 'payment'
     } = req.body;
 
-    if (!ledgerId || !metalType || !metalRate || !fineGiven) {
+    fineGiven = toNumber(req.body.fineGiven);
+    const rate = toNumber(metalRate);
+
+    if (!ledgerId || !['gold', 'silver'].includes(metalType) || !['payment', 'receipt'].includes(direction)) {
       return res.status(400).json({
         success: false,
-        message: 'All fields are required'
+        message: 'ledgerId, metalType and direction are required'
       });
     }
 
-    // Get ledger
+    if (fineGiven <= 0 || rate <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'fineGiven and metalRate must be greater than zero'
+      });
+    }
+
     const ledger = await Ledger.findOne({
       _id: ledgerId,
       userId: req.userId
     });
-
     if (!ledger) {
       return res.status(404).json({
         success: false,
@@ -40,111 +60,153 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Get balance based on metal type
-    const balanceBefore = metalType === 'gold' 
-      ? ledger.balances.goldFineWeight 
-      : ledger.balances.silverFineWeight;
+    const balanceBeforeFine = metalType === 'gold'
+      ? toNumber(ledger.balances.goldFineWeight)
+      : toNumber(ledger.balances.silverFineWeight);
 
-    // Check balance only for positive settlements
-    if (fineGiven > 0 && balanceBefore < fineGiven) {
+    const amount = fineGiven * rate;
+
+    if (direction === 'payment' && balanceBeforeFine < fineGiven) {
       return res.status(400).json({
         success: false,
         message: 'Insufficient balance for settlement'
       });
     }
 
-    // For negative settlements, allow any value (represents reversal/adjustment)
-    // No additional validation needed
+    if (direction === 'payment' && toNumber(ledger.balances.creditBalance) < amount) {
+      return res.status(400).json({
+        success: false,
+        message: 'Settlement amount exceeds pending credit balance'
+      });
+    }
 
-    // Calculate amount
-    const amount = fineGiven * metalRate;
+    if (direction === 'payment') {
+      if (metalType === 'gold') {
+        await deductFromStock(req.userId, fineGiven, 0);
+      } else {
+        await deductFromStock(req.userId, 0, fineGiven);
+      }
+      stockAdjusted = true;
+      stockAction = 'deduct';
+    } else {
+      if (metalType === 'gold') {
+        await addBackToStock(req.userId, fineGiven, 0);
+      } else {
+        await addBackToStock(req.userId, 0, fineGiven);
+      }
+      stockAdjusted = true;
+      stockAction = 'add';
+    }
 
-    // Create settlement
+    const fineMultiplier = direction === 'receipt' ? 1 : -1;
+    const amountMultiplier = direction === 'receipt' ? 1 : -1;
+
+    const updatedFine = balanceBeforeFine + (fineMultiplier * fineGiven);
+    const updatedCredit = toNumber(ledger.balances.creditBalance) + (amountMultiplier * amount);
+
+    if (updatedFine < 0 || updatedCredit < 0) {
+      if (stockAdjusted) {
+        if (stockAction === 'deduct') {
+          await addBackToStock(req.userId, metalType === 'gold' ? fineGiven : 0, metalType === 'silver' ? fineGiven : 0);
+        } else {
+          await deductFromStock(req.userId, metalType === 'gold' ? fineGiven : 0, metalType === 'silver' ? fineGiven : 0);
+        }
+      }
+
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid settlement resulting in negative balance'
+      });
+    }
+
     const settlement = new Settlement({
       userId: req.userId,
       ledgerId,
       customerName: ledger.name,
       date: date || new Date(),
       metalType,
-      balanceBefore,
-      metalRate,
+      balanceBefore: balanceBeforeFine,
+      metalRate: rate,
       fineGiven,
       amount,
+      direction,
       balanceAfter: {
-        amount: ledger.balances.amount - amount,
-        fineWeight: balanceBefore - fineGiven
+        amount: updatedCredit,
+        fineWeight: updatedFine
       },
       narration: narration || ''
     });
 
     await settlement.save();
 
-    // Update ledger balances
-    ledger.balances.amount -= amount;
-    
     if (metalType === 'gold') {
-      ledger.balances.goldFineWeight -= fineGiven;
+      ledger.balances.goldFineWeight = updatedFine;
     } else {
-      ledger.balances.silverFineWeight -= fineGiven;
+      ledger.balances.silverFineWeight = updatedFine;
     }
-
+    ledger.balances.creditBalance = updatedCredit;
+    ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
     await ledger.save();
 
-    // Deduct fine given from stock
-    if (metalType === 'gold') {
-      await deductFromStock(req.userId, fineGiven, 0);
-    } else {
-      await deductFromStock(req.userId, 0, fineGiven);
-    }
-
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: 'Settlement created successfully',
       settlement
     });
   } catch (error) {
+    if (stockAdjusted) {
+      try {
+        if (stockAction === 'deduct') {
+          await addBackToStock(req.userId, req.body.metalType === 'gold' ? fineGiven : 0, req.body.metalType === 'silver' ? fineGiven : 0);
+        } else if (stockAction === 'add') {
+          await deductFromStock(req.userId, req.body.metalType === 'gold' ? fineGiven : 0, req.body.metalType === 'silver' ? fineGiven : 0);
+        }
+      } catch (rollbackError) {
+        console.error('Settlement rollback stock error:', rollbackError);
+      }
+    }
+
     console.error('Create settlement error:', error);
-    res.status(500).json({
+    return res.status(error.status || 500).json({
       success: false,
-      message: 'Server error creating settlement'
+      message: error.message || 'Server error creating settlement'
     });
   }
 });
 
-// Get all settlements
 router.get('/', async (req, res) => {
   try {
     const { startDate, endDate, ledgerId } = req.query;
     const query = { userId: req.userId };
 
-    if (ledgerId) {
-      query.ledgerId = ledgerId;
-    }
-
+    if (ledgerId) query.ledgerId = ledgerId;
     if (startDate || endDate) {
       query.date = {};
       if (startDate) query.date.$gte = new Date(startDate);
-      if (endDate) query.date.$lte = new Date(endDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        query.date.$lte = end;
+      }
     }
 
     const settlements = await Settlement.find(query)
       .populate('ledgerId', 'name phoneNumber')
       .sort({ date: -1 });
 
-    res.json({
+    return res.json({
       success: true,
       settlements
     });
   } catch (error) {
     console.error('Get settlements error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error fetching settlements'
     });
   }
 });
 
-// Get single settlement
 router.get('/:id', async (req, res) => {
   try {
     const settlement = await Settlement.findOne({
@@ -159,27 +221,25 @@ router.get('/:id', async (req, res) => {
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
       settlement
     });
   } catch (error) {
     console.error('Get settlement error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error fetching settlement'
     });
   }
 });
 
-// Delete settlement
 router.delete('/:id', async (req, res) => {
   try {
     const settlement = await Settlement.findOne({
       _id: req.params.id,
       userId: req.userId
     });
-
     if (!settlement) {
       return res.status(404).json({
         success: false,
@@ -188,38 +248,45 @@ router.delete('/:id', async (req, res) => {
     }
 
     const ledger = await Ledger.findById(settlement.ledgerId);
-
     if (ledger) {
-      // Reverse balance updates
-      ledger.balances.amount += settlement.amount;
-      
-      if (settlement.metalType === 'gold') {
-        ledger.balances.goldFineWeight += settlement.fineGiven;
-      } else {
-        ledger.balances.silverFineWeight += settlement.fineGiven;
-      }
+      const fineMultiplier = settlement.direction === 'receipt' ? -1 : 1;
+      const amountMultiplier = settlement.direction === 'receipt' ? -1 : 1;
 
+      if (settlement.metalType === 'gold') {
+        ledger.balances.goldFineWeight += fineMultiplier * toNumber(settlement.fineGiven);
+      } else {
+        ledger.balances.silverFineWeight += fineMultiplier * toNumber(settlement.fineGiven);
+      }
+      ledger.balances.creditBalance += amountMultiplier * toNumber(settlement.amount);
+      ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
       await ledger.save();
     }
 
-    // Add fine given back to stock
-    if (settlement.metalType === 'gold') {
-      await addBackToStock(req.userId, settlement.fineGiven, 0);
+    if (settlement.direction === 'payment') {
+      await addBackToStock(
+        req.userId,
+        settlement.metalType === 'gold' ? settlement.fineGiven : 0,
+        settlement.metalType === 'silver' ? settlement.fineGiven : 0
+      );
     } else {
-      await addBackToStock(req.userId, 0, settlement.fineGiven);
+      await deductFromStock(
+        req.userId,
+        settlement.metalType === 'gold' ? settlement.fineGiven : 0,
+        settlement.metalType === 'silver' ? settlement.fineGiven : 0
+      );
     }
 
     await Settlement.findByIdAndDelete(req.params.id);
 
-    res.json({
+    return res.json({
       success: true,
       message: 'Settlement deleted successfully'
     });
   } catch (error) {
     console.error('Delete settlement error:', error);
-    res.status(500).json({
+    return res.status(error.status || 500).json({
       success: false,
-      message: 'Server error deleting settlement'
+      message: error.message || 'Server error deleting settlement'
     });
   }
 });

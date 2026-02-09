@@ -4,26 +4,26 @@ const User = require('./models/User');
 
 const seedAdmin = async () => {
   try {
-    // Connect to MongoDB
     await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/gold-silver-saas');
-    console.log('✅ Connected to MongoDB');
+    console.log('Connected to MongoDB');
 
-    // Check if admin already exists
     const adminExists = await User.findOne({ role: 'admin' });
-    
     if (adminExists) {
-      console.log('⚠️  Admin user already exists');
+      console.log('Admin user already exists');
       console.log('Shop Name:', adminExists.shopName);
       console.log('Phone:', adminExists.phoneNumber);
       await mongoose.disconnect();
       return;
     }
 
-    // Create admin user
+    const adminPhone = process.env.ADMIN_PHONE || '8904286980';
+    const adminPassword = process.env.ADMIN_PASSWORD || 'ChangeMe123!';
+    const adminShopName = process.env.ADMIN_SHOP_NAME || 'Admin';
+
     const admin = new User({
-      shopName: 'Admin',
-      phoneNumber: '8904286980',
-      password: 'Nikhil*9630',
+      shopName: adminShopName,
+      phoneNumber: adminPhone,
+      password: adminPassword,
       role: 'admin',
       licenseExpiryDate: new Date('2099-12-31'),
       licenseDays: 999999
@@ -31,18 +31,21 @@ const seedAdmin = async () => {
 
     await admin.save();
 
-    console.log('✅ Admin user created successfully!');
+    console.log('Admin user created successfully');
     console.log('');
     console.log('Login credentials:');
-    console.log('Phone: 8904286980');
-    console.log('Password: Nikhil*9630');
+    console.log(`Phone: ${adminPhone}`);
+    console.log(`Password: ${adminPassword}`);
     console.log('');
-    console.log('⚠️  Please change the password after first login!');
+    if (!process.env.ADMIN_PASSWORD) {
+      console.log('ADMIN_PASSWORD env not set. Default password was used.');
+    }
+    console.log('Please change the password after first login.');
 
     await mongoose.disconnect();
-    console.log('✅ Database connection closed');
+    console.log('Database connection closed');
   } catch (error) {
-    console.error('❌ Error seeding admin:', error);
+    console.error('Error seeding admin:', error);
     process.exit(1);
   }
 };

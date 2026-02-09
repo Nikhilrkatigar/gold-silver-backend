@@ -1,158 +1,209 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
-const { auth, isAdmin } = require('../middleware/auth');
+const { auth } = require('../middleware/auth');
+const CONSTANTS = require('../utils/constants');
 
-// Generate JWT token
-const generateToken = (userId) => {
-  return jwt.sign({ userId }, process.env.JWT_SECRET, {
-    expiresIn: '30d'
+const sanitizePhone = (phone) => String(phone || '').replace(/\D/g, '');
+
+const generateToken = (userId) => (
+  jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: CONSTANTS.JWT.EXPIRY })
+);
+
+const validateLogin = [
+  body('phoneNumber')
+    .customSanitizer(sanitizePhone)
+    .matches(CONSTANTS.VALIDATION.PHONE_REGEX)
+    .withMessage(CONSTANTS.ERROR_MESSAGES.INVALID_PHONE),
+  body('password')
+    .notEmpty()
+    .withMessage('Password is required')
+];
+
+const validateCreateAdmin = [
+  body('shopName').trim().isLength({ min: 2 }).withMessage('Shop name is required'),
+  body('phoneNumber')
+    .customSanitizer(sanitizePhone)
+    .matches(CONSTANTS.VALIDATION.PHONE_REGEX)
+    .withMessage(CONSTANTS.ERROR_MESSAGES.INVALID_PHONE),
+  body('password')
+    .isLength({ min: CONSTANTS.VALIDATION.PASSWORD_MIN_LENGTH })
+    .withMessage(`Password must be at least ${CONSTANTS.VALIDATION.PASSWORD_MIN_LENGTH} characters`)
+];
+
+const handleValidationErrors = (req, res, next) => {
+  const errors = validationResult(req);
+  if (errors.isEmpty()) return next();
+
+  return res.status(CONSTANTS.HTTP_STATUS.BAD_REQUEST).json({
+    success: false,
+    message: 'Validation failed',
+    errors: errors.array().map((err) => ({ field: err.path, message: err.msg }))
   });
 };
 
-// Login
-router.post('/login', async (req, res) => {
-  try {
-    const { phoneNumber, password } = req.body;
+const mapUser = (user) => ({
+  id: user._id,
+  shopName: user.shopName,
+  phoneNumber: user.phoneNumber,
+  role: user.role,
+  licenseExpiryDate: user.licenseExpiryDate,
+  theme: user.theme,
+  voucherSettings: user.voucherSettings,
+  gstEnabled: user.gstEnabled,
+  gstSettings: user.gstSettings,
+  daysUntilExpiry: user.getDaysUntilExpiry?.(),
+  isLicenseExpired: user.isLicenseExpired?.()
+});
 
-    if (!phoneNumber || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide phone number and password'
-      });
-    }
+router.post('/login', validateLogin, handleValidationErrors, async (req, res) => {
+  try {
+    const phoneNumber = sanitizePhone(req.body.phoneNumber);
+    const { password } = req.body;
 
     const user = await User.findOne({ phoneNumber });
-
     if (!user) {
-      return res.status(401).json({
+      return res.status(CONSTANTS.HTTP_STATUS.UNAUTHORIZED).json({
         success: false,
-        message: 'Invalid credentials'
+        message: CONSTANTS.ERROR_MESSAGES.INVALID_CREDENTIALS
       });
     }
 
     const isPasswordValid = await user.comparePassword(password);
-
     if (!isPasswordValid) {
-      return res.status(401).json({
+      return res.status(CONSTANTS.HTTP_STATUS.UNAUTHORIZED).json({
         success: false,
-        message: 'Invalid credentials'
+        message: CONSTANTS.ERROR_MESSAGES.INVALID_CREDENTIALS
       });
     }
 
     if (!user.isActive) {
-      return res.status(403).json({
+      return res.status(CONSTANTS.HTTP_STATUS.FORBIDDEN).json({
         success: false,
         message: 'Account is deactivated. Please contact admin.'
       });
     }
 
-    const token = generateToken(user._id);
-
-    res.json({
+    return res.json({
       success: true,
-      token,
-      user: {
-        id: user._id,
-        shopName: user.shopName,
-        phoneNumber: user.phoneNumber,
-        role: user.role,
-        licenseExpiryDate: user.licenseExpiryDate,
-        theme: user.theme,
-        voucherSettings: user.voucherSettings,
-        daysUntilExpiry: user.getDaysUntilExpiry()
-      }
+      token: generateToken(user._id),
+      user: mapUser(user)
     });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({
+    return res.status(CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
       success: false,
-      message: 'Server error during login'
+      message: CONSTANTS.ERROR_MESSAGES.SERVER_ERROR
     });
   }
 });
 
-// Get current user
 router.get('/me', auth, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('-password');
-    
-    res.json({
+    if (!user) {
+      return res.status(CONSTANTS.HTTP_STATUS.NOT_FOUND).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    return res.json({
       success: true,
-      user: {
-        id: user._id,
-        shopName: user.shopName,
-        phoneNumber: user.phoneNumber,
-        role: user.role,
-        licenseExpiryDate: user.licenseExpiryDate,
-        theme: user.theme,
-        voucherSettings: user.voucherSettings,
-        daysUntilExpiry: user.getDaysUntilExpiry(),
-        isLicenseExpired: user.isLicenseExpired()
-      }
+      user: mapUser(user)
     });
   } catch (error) {
     console.error('Get user error:', error);
-    res.status(500).json({
+    return res.status(CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
       success: false,
-      message: 'Server error'
+      message: CONSTANTS.ERROR_MESSAGES.SERVER_ERROR
     });
   }
 });
 
-// Update user settings
 router.patch('/settings', auth, async (req, res) => {
   try {
-    const { theme, voucherSettings } = req.body;
-    const updates = {};
+    const { theme, voucherSettings, gstSettings } = req.body;
+    const user = await User.findById(req.userId);
 
-    if (theme) updates.theme = theme;
-    if (voucherSettings) updates.voucherSettings = voucherSettings;
+    if (!user) {
+      return res.status(CONSTANTS.HTTP_STATUS.NOT_FOUND).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
 
-    const user = await User.findByIdAndUpdate(
-      req.userId,
-      updates,
-      { new: true, runValidators: true }
-    ).select('-password');
-
-    res.json({
-      success: true,
-      user: {
-        id: user._id,
-        shopName: user.shopName,
-        phoneNumber: user.phoneNumber,
-        role: user.role,
-        theme: user.theme,
-        voucherSettings: user.voucherSettings
+    if (theme !== undefined) {
+      if (!['light', 'dark', 'system'].includes(theme)) {
+        return res.status(CONSTANTS.HTTP_STATUS.BAD_REQUEST).json({
+          success: false,
+          message: 'Invalid theme selected'
+        });
       }
+      user.theme = theme;
+    }
+
+    if (voucherSettings) {
+      user.voucherSettings = {
+        ...(user.voucherSettings?.toObject?.() || user.voucherSettings || {}),
+        ...voucherSettings
+      };
+    }
+
+    if (gstSettings) {
+      if (!user.gstEnabled) {
+        return res.status(CONSTANTS.HTTP_STATUS.FORBIDDEN).json({
+          success: false,
+          message: 'GST is disabled for this account'
+        });
+      }
+
+      if (user.role !== 'admin' && user.gstSettings?.gstEditPermission === 'admin') {
+        return res.status(CONSTANTS.HTTP_STATUS.FORBIDDEN).json({
+          success: false,
+          message: 'Only admin can edit GST settings for this account'
+        });
+      }
+
+      user.gstSettings = {
+        ...(user.gstSettings?.toObject?.() || user.gstSettings || {}),
+        ...gstSettings,
+        gstNumber: gstSettings.gstNumber ? gstSettings.gstNumber.toUpperCase() : user.gstSettings?.gstNumber
+      };
+    }
+
+    await user.save();
+
+    return res.json({
+      success: true,
+      user: mapUser(user)
     });
   } catch (error) {
     console.error('Update settings error:', error);
-    res.status(500).json({
+    return res.status(CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
       success: false,
       message: 'Server error updating settings'
     });
   }
 });
 
-// Create first admin (only if no admin exists)
-router.post('/create-admin', async (req, res) => {
+router.post('/create-admin', validateCreateAdmin, handleValidationErrors, async (req, res) => {
   try {
-    const { shopName, phoneNumber, password } = req.body;
+    const { shopName, password } = req.body;
+    const phoneNumber = sanitizePhone(req.body.phoneNumber);
 
-    // Check if any admin exists
     const adminExists = await User.findOne({ role: 'admin' });
-    
     if (adminExists) {
-      return res.status(403).json({
+      return res.status(CONSTANTS.HTTP_STATUS.FORBIDDEN).json({
         success: false,
         message: 'Admin already exists'
       });
     }
 
     const admin = new User({
-      shopName,
+      shopName: shopName.trim(),
       phoneNumber,
       password,
       role: 'admin',
@@ -162,12 +213,10 @@ router.post('/create-admin', async (req, res) => {
 
     await admin.save();
 
-    const token = generateToken(admin._id);
-
-    res.status(201).json({
+    return res.status(CONSTANTS.HTTP_STATUS.CREATED).json({
       success: true,
       message: 'Admin created successfully',
-      token,
+      token: generateToken(admin._id),
       user: {
         id: admin._id,
         shopName: admin.shopName,
@@ -177,7 +226,7 @@ router.post('/create-admin', async (req, res) => {
     });
   } catch (error) {
     console.error('Create admin error:', error);
-    res.status(500).json({
+    return res.status(CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
       success: false,
       message: 'Server error creating admin'
     });

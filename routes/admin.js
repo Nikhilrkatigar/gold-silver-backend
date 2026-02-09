@@ -3,25 +3,55 @@ const router = express.Router();
 const User = require('../models/User');
 const Ledger = require('../models/Ledger');
 const Voucher = require('../models/Voucher');
+const Settlement = require('../models/Settlement');
+const Karigar = require('../models/Karigar');
+const { Stock, StockInput } = require('../models/Stock');
 const { auth, isAdmin } = require('../middleware/auth');
 
-// All admin routes require authentication and admin role
+const sanitizePhone = (phone) => String(phone || '').replace(/\D/g, '');
+
+const mapUser = (user) => ({
+  id: user._id,
+  shopName: user.shopName,
+  phoneNumber: user.phoneNumber,
+  licenseExpiryDate: user.licenseExpiryDate,
+  licenseDays: user.licenseDays,
+  daysUntilExpiry: user.getDaysUntilExpiry(),
+  isExpired: user.isLicenseExpired(),
+  isActive: user.isActive,
+  gstEnabled: user.gstEnabled,
+  gstSettings: user.gstSettings,
+  createdAt: user.createdAt
+});
+
 router.use(auth);
 router.use(isAdmin);
 
-// Add new user
 router.post('/users', async (req, res) => {
   try {
-    const { shopName, phoneNumber, password, licenseDays } = req.body;
+    const {
+      shopName,
+      password,
+      gstEnabled = false,
+      gstSettings = {}
+    } = req.body;
+    const phoneNumber = sanitizePhone(req.body.phoneNumber);
+    const licenseDays = Number(req.body.licenseDays);
 
-    if (!shopName || !phoneNumber || !password || !licenseDays) {
+    if (!shopName || !phoneNumber || !password || !Number.isFinite(licenseDays) || licenseDays <= 0) {
       return res.status(400).json({
         success: false,
-        message: 'All fields are required'
+        message: 'Valid shopName, phoneNumber, password and licenseDays are required'
       });
     }
 
-    // Check if user already exists
+    if (!/^[0-9]{10}$/.test(phoneNumber)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Phone number must be 10 digits'
+      });
+    }
+
     const existingUser = await User.findOne({ phoneNumber });
     if (existingUser) {
       return res.status(400).json({
@@ -30,76 +60,58 @@ router.post('/users', async (req, res) => {
       });
     }
 
-    // Calculate license expiry date
     const licenseExpiryDate = new Date();
-    licenseExpiryDate.setDate(licenseExpiryDate.getDate() + parseInt(licenseDays));
+    licenseExpiryDate.setDate(licenseExpiryDate.getDate() + Math.floor(licenseDays));
 
     const user = new User({
-      shopName,
+      shopName: shopName.trim(),
       phoneNumber,
       password,
-      licenseDays: parseInt(licenseDays),
+      licenseDays: Math.floor(licenseDays),
       licenseExpiryDate,
       role: 'user',
-      createdBy: req.userId
+      createdBy: req.userId,
+      gstEnabled: !!gstEnabled,
+      gstSettings: {
+        defaultGSTRate: gstSettings.defaultGSTRate ?? 18,
+        gstEditPermission: gstSettings.gstEditPermission || 'user',
+        gstNumber: gstSettings.gstNumber || undefined,
+        businessState: gstSettings.businessState || undefined
+      }
     });
 
     await user.save();
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: 'User created successfully',
-      user: {
-        id: user._id,
-        shopName: user.shopName,
-        phoneNumber: user.phoneNumber,
-        licenseExpiryDate: user.licenseExpiryDate,
-        licenseDays: user.licenseDays,
-        daysUntilExpiry: user.getDaysUntilExpiry()
-      }
+      user: mapUser(user)
     });
   } catch (error) {
     console.error('Create user error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error creating user'
     });
   }
 });
 
-// Get all users
 router.get('/users', async (req, res) => {
   try {
-    const users = await User.find({ role: 'user' })
-      .select('-password')
-      .sort({ createdAt: -1 });
-
-    const usersWithExpiry = users.map(user => ({
-      id: user._id,
-      shopName: user.shopName,
-      phoneNumber: user.phoneNumber,
-      licenseExpiryDate: user.licenseExpiryDate,
-      licenseDays: user.licenseDays,
-      daysUntilExpiry: user.getDaysUntilExpiry(),
-      isExpired: user.isLicenseExpired(),
-      isActive: user.isActive,
-      createdAt: user.createdAt
-    }));
-
-    res.json({
+    const users = await User.find({ role: 'user' }).select('-password').sort({ createdAt: -1 });
+    return res.json({
       success: true,
-      users: usersWithExpiry
+      users: users.map(mapUser)
     });
   } catch (error) {
     console.error('Get users error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error fetching users'
     });
   }
 });
 
-// Get soon expiring users (within 7 days)
 router.get('/users/expiring', async (req, res) => {
   try {
     const sevenDaysFromNow = new Date();
@@ -111,61 +123,36 @@ router.get('/users/expiring', async (req, res) => {
         $gte: new Date(),
         $lte: sevenDaysFromNow
       }
-    }).select('-password').sort({ licenseExpiryDate: 1 });
+    })
+      .select('-password')
+      .sort({ licenseExpiryDate: 1 });
 
-    const usersWithExpiry = users.map(user => ({
-      id: user._id,
-      shopName: user.shopName,
-      phoneNumber: user.phoneNumber,
-      licenseExpiryDate: user.licenseExpiryDate,
-      daysUntilExpiry: user.getDaysUntilExpiry()
-    }));
-
-    res.json({
+    return res.json({
       success: true,
-      users: usersWithExpiry
+      users: users.map((user) => ({
+        id: user._id,
+        shopName: user.shopName,
+        phoneNumber: user.phoneNumber,
+        licenseExpiryDate: user.licenseExpiryDate,
+        daysUntilExpiry: user.getDaysUntilExpiry()
+      }))
     });
   } catch (error) {
     console.error('Get expiring users error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error fetching expiring users'
     });
   }
 });
 
-// Update user
 router.patch('/users/:id', async (req, res) => {
   try {
-    const { shopName, phoneNumber, password, licenseDays } = req.body;
-    const updates = {};
+    const { shopName, password, gstEnabled, gstSettings } = req.body;
+    const phoneNumber = req.body.phoneNumber ? sanitizePhone(req.body.phoneNumber) : undefined;
+    const extraLicenseDays = req.body.licenseDays !== undefined ? Number(req.body.licenseDays) : undefined;
 
-    if (shopName) updates.shopName = shopName;
-    if (phoneNumber) updates.phoneNumber = phoneNumber;
-    if (password) updates.password = password;
-    
-    if (licenseDays) {
-      const user = await User.findById(req.params.id);
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: 'User not found'
-        });
-      }
-      
-      // Extend license from current expiry date
-      const newExpiryDate = new Date(user.licenseExpiryDate);
-      newExpiryDate.setDate(newExpiryDate.getDate() + parseInt(licenseDays));
-      updates.licenseExpiryDate = newExpiryDate;
-      updates.licenseDays = user.licenseDays + parseInt(licenseDays);
-    }
-
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      updates,
-      { new: true, runValidators: true }
-    ).select('-password');
-
+    const user = await User.findOne({ _id: req.params.id, role: 'user' });
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -173,32 +160,79 @@ router.patch('/users/:id', async (req, res) => {
       });
     }
 
-    res.json({
+    if (shopName !== undefined) user.shopName = shopName.trim();
+
+    if (phoneNumber !== undefined) {
+      if (!/^[0-9]{10}$/.test(phoneNumber)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Phone number must be 10 digits'
+        });
+      }
+
+      const existingPhone = await User.findOne({
+        _id: { $ne: user._id },
+        phoneNumber
+      });
+      if (existingPhone) {
+        return res.status(400).json({
+          success: false,
+          message: 'Another user already uses this phone number'
+        });
+      }
+
+      user.phoneNumber = phoneNumber;
+    }
+
+    if (password) {
+      user.password = password;
+    }
+
+    if (gstEnabled !== undefined) {
+      user.gstEnabled = !!gstEnabled;
+    }
+
+    if (gstSettings) {
+      user.gstSettings = {
+        ...(user.gstSettings?.toObject?.() || user.gstSettings || {}),
+        ...gstSettings
+      };
+    }
+
+    if (extraLicenseDays !== undefined) {
+      if (!Number.isFinite(extraLicenseDays) || extraLicenseDays <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'licenseDays must be a positive number'
+        });
+      }
+
+      const now = new Date();
+      const baseDate = user.licenseExpiryDate > now ? new Date(user.licenseExpiryDate) : now;
+      baseDate.setDate(baseDate.getDate() + Math.floor(extraLicenseDays));
+      user.licenseExpiryDate = baseDate;
+      user.licenseDays += Math.floor(extraLicenseDays);
+    }
+
+    await user.save();
+
+    return res.json({
       success: true,
       message: 'User updated successfully',
-      user: {
-        id: user._id,
-        shopName: user.shopName,
-        phoneNumber: user.phoneNumber,
-        licenseExpiryDate: user.licenseExpiryDate,
-        licenseDays: user.licenseDays,
-        daysUntilExpiry: user.getDaysUntilExpiry()
-      }
+      user: mapUser(user)
     });
   } catch (error) {
     console.error('Update user error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error updating user'
     });
   }
 });
 
-// Delete user
 router.delete('/users/:id', async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
-
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -213,37 +247,41 @@ router.delete('/users/:id', async (req, res) => {
       });
     }
 
-    // Delete all associated data
-    await Ledger.deleteMany({ userId: req.params.id });
-    await Voucher.deleteMany({ userId: req.params.id });
-    await User.findByIdAndDelete(req.params.id);
+    await Promise.all([
+      Ledger.deleteMany({ userId: req.params.id }),
+      Voucher.deleteMany({ userId: req.params.id }),
+      Settlement.deleteMany({ userId: req.params.id }),
+      Karigar.deleteMany({ userId: req.params.id }),
+      Stock.deleteMany({ userId: req.params.id }),
+      StockInput.deleteMany({ userId: req.params.id }),
+      User.findByIdAndDelete(req.params.id)
+    ]);
 
-    res.json({
+    return res.json({
       success: true,
       message: 'User and all associated data deleted successfully'
     });
   } catch (error) {
     console.error('Delete user error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error deleting user'
     });
   }
 });
 
-// Get admin statistics
 router.get('/stats', async (req, res) => {
   try {
     const totalUsers = await User.countDocuments({ role: 'user' });
-    const activeUsers = await User.countDocuments({ 
+    const activeUsers = await User.countDocuments({
       role: 'user',
       licenseExpiryDate: { $gte: new Date() }
     });
     const expiredUsers = totalUsers - activeUsers;
-    
+
     const sevenDaysFromNow = new Date();
     sevenDaysFromNow.setDate(sevenDaysFromNow.getDate() + 7);
-    
+
     const expiringUsers = await User.countDocuments({
       role: 'user',
       licenseExpiryDate: {
@@ -252,7 +290,7 @@ router.get('/stats', async (req, res) => {
       }
     });
 
-    res.json({
+    return res.json({
       success: true,
       stats: {
         totalUsers,
@@ -263,7 +301,7 @@ router.get('/stats', async (req, res) => {
     });
   } catch (error) {
     console.error('Get stats error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error fetching statistics'
     });

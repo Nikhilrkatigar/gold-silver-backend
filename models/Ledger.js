@@ -9,12 +9,38 @@ const ledgerSchema = new mongoose.Schema({
   phoneNumber: {
     type: String,
     required: true,
-    trim: true
+    trim: true,
+    match: [/^[0-9]{10}$/, 'Phone number must be 10 digits']
   },
   userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
+  },
+  gstDetails: {
+    hasGST: {
+      type: Boolean,
+      default: false
+    },
+    gstNumber: {
+      type: String,
+      trim: true,
+      sparse: true,
+      validate: {
+        validator: function(v) {
+          if (!v) return !this.gstDetails.hasGST;
+          // Format: 2 digits (state) + 5 letters (PAN) + 4 digits (entity) + 4 alphanumeric (check/filler)
+          return /^\d{2}[A-Z]{5}\d{4}[A-Z0-9]{4}$/.test(v);
+        },
+        message: 'Invalid GST number format (e.g., 29AABCR1718E1ZL)'
+      }
+    },
+    stateCode: {
+      type: String,
+      trim: true,
+      sparse: true,
+      match: [/^\d{2}$/, 'State code must be 2 digits']
+    }
   },
   balances: {
     goldFineWeight: {
@@ -44,6 +70,19 @@ const ledgerSchema = new mongoose.Schema({
   }
 }, {
   timestamps: true
+});
+
+ledgerSchema.pre('validate', function normalizeFields(next) {
+  if (this.phoneNumber) {
+    this.phoneNumber = String(this.phoneNumber).replace(/\D/g, '');
+  }
+  if (this.gstDetails?.gstNumber) {
+    this.gstDetails.gstNumber = this.gstDetails.gstNumber.toUpperCase();
+  }
+  if (this.gstDetails?.stateCode) {
+    this.gstDetails.stateCode = String(this.gstDetails.stateCode).padStart(2, '0');
+  }
+  next();
 });
 
 // Index for faster queries

@@ -46,6 +46,11 @@ const voucherItemSchema = new mongoose.Schema({
     type: String,
     enum: ['gold', 'silver'],
     required: true
+  },
+  hsnCode: {
+    type: String,
+    default: '7108',
+    trim: true
   }
 });
 
@@ -72,6 +77,73 @@ const voucherSchema = new mongoose.Schema({
     type: Date,
     required: true,
     default: Date.now
+  },
+  invoiceType: {
+    type: String,
+    enum: ['normal', 'gst'],
+    default: 'normal'
+  },
+  invoiceNumber: {
+    type: String,
+    trim: true,
+    sparse: true,
+    index: true
+  },
+  referenceNo: {
+    type: String,
+    trim: true,
+    sparse: true
+  },
+  gstDetails: {
+    sellerGSTNumber: {
+      type: String,
+      trim: true,
+      sparse: true
+    },
+    sellerState: {
+      type: String,
+      trim: true,
+      sparse: true
+    },
+    customerGSTNumber: {
+      type: String,
+      trim: true,
+      sparse: true
+    },
+    customerState: {
+      type: String,
+      trim: true,
+      sparse: true
+    },
+    gstType: {
+      type: String,
+      enum: ['IGST', 'CGST_SGST'],
+      sparse: true
+    },
+    gstRate: {
+      type: Number,
+      default: 0
+    },
+    taxableValue: {
+      type: Number,
+      default: 0
+    },
+    igst: {
+      type: Number,
+      default: 0
+    },
+    cgst: {
+      type: Number,
+      default: 0
+    },
+    sgst: {
+      type: Number,
+      default: 0
+    },
+    totalGST: {
+      type: Number,
+      default: 0
+    }
   },
   paymentType: {
     type: String,
@@ -132,11 +204,84 @@ const voucherSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  eWayBill: {
+    type: String,
+    trim: true,
+    sparse: true
+  },
+  eWayBillNo: {
+    type: String,
+    trim: true,
+    sparse: true
+  },
+  transportDetails: {
+    type: String,
+    trim: true,
+    sparse: true
+  },
+  transport: {
+    type: String,
+    trim: true,
+    sparse: true
+  },
+  transportId: {
+    type: String,
+    trim: true,
+    sparse: true
+  },
+  deliveryLocation: {
+    type: String,
+    trim: true,
+    sparse: true
+  },
+  bankName: {
+    type: String,
+    trim: true,
+    sparse: true
+  },
+  accountNumber: {
+    type: String,
+    trim: true,
+    sparse: true
+  },
+  ifscCode: {
+    type: String,
+    trim: true,
+    sparse: true
+  },
+  upiId: {
+    type: String,
+    trim: true,
+    sparse: true
+  },
   creditDueDate: {
     type: Date
+  },
+  status: {
+    type: String,
+    enum: ['active', 'cancelled'],
+    default: 'active'
+  },
+  cancelledReason: {
+    type: String,
+    sparse: true
   }
 }, {
   timestamps: true
+});
+
+voucherSchema.pre('validate', function normalizeVoucherFields(next) {
+  if (this.invoiceNumber) {
+    this.invoiceNumber = this.invoiceNumber.trim();
+  }
+  if (this.items?.length) {
+    this.items.forEach((item) => {
+      if (item.hsnCode) {
+        item.hsnCode = String(item.hsnCode).trim();
+      }
+    });
+  }
+  next();
 });
 
 // Index for efficient queries
@@ -144,5 +289,6 @@ voucherSchema.index({ userId: 1, voucherNumber: 1 });
 voucherSchema.index({ userId: 1, ledgerId: 1 });
 voucherSchema.index({ userId: 1, date: -1 });
 voucherSchema.index({ userId: 1, creditDueDate: 1 });
+voucherSchema.index({ userId: 1, invoiceNumber: 1 });
 
 module.exports = mongoose.model('Voucher', voucherSchema);

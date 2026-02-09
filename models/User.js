@@ -11,11 +11,13 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: true,
     unique: true,
-    trim: true
+    trim: true,
+    match: [/^[0-9]{10}$/, 'Phone number must be 10 digits']
   },
   password: {
     type: String,
-    required: true
+    required: true,
+    minlength: 6
   },
   role: {
     type: String,
@@ -40,6 +42,45 @@ const userSchema = new mongoose.Schema({
       default: 1
     }
   },
+  gstEnabled: {
+    type: Boolean,
+    default: false
+  },
+  gstSettings: {
+    gstNumber: {
+      type: String,
+      trim: true,
+      sparse: true,
+      validate: {
+        validator: function(v) {
+          if (!v) return !this.gstEnabled; // Optional if GST disabled
+          // GST Format: 2 digits (state) + 5 letters (PAN) + 4 digits (entity) + 4 alphanumeric (check/filler)
+          return /^\d{2}[A-Z]{5}\d{4}[A-Z0-9]{4}$/.test(v);
+        },
+        message: 'Invalid GST number format (format: 29AABCR1718E1ZL)'
+      }
+    },
+    businessState: {
+      type: String,
+      enum: [
+        '01', '02', '03', '04', '05', '06', '07', '08', '09', '10',
+        '11', '12', '13', '14', '15', '16', '17', '18', '19', '20',
+        '21', '22', '23', '24', '25', '26', '27', '28', '29', '30',
+        '31', '32', '33', '34', '35', '36', '37', '38', '97', '99'
+      ],
+      sparse: true
+    },
+    defaultGSTRate: {
+      type: Number,
+      enum: [0, 3, 5, 12, 18],
+      default: 18
+    },
+    gstEditPermission: {
+      type: String,
+      enum: ['user', 'admin'],
+      default: 'user'
+    }
+  },
   theme: {
     type: String,
     enum: ['light', 'dark', 'system'],
@@ -55,6 +96,16 @@ const userSchema = new mongoose.Schema({
   }
 }, {
   timestamps: true
+});
+
+userSchema.pre('validate', function normalizePhone(next) {
+  if (this.phoneNumber) {
+    this.phoneNumber = String(this.phoneNumber).replace(/\D/g, '');
+  }
+  if (this.gstSettings?.gstNumber) {
+    this.gstSettings.gstNumber = this.gstSettings.gstNumber.toUpperCase();
+  }
+  next();
 });
 
 // Hash password before saving
