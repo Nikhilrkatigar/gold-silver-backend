@@ -62,6 +62,17 @@ const getFineByMetal = (items = []) => items.reduce(
 const reverseVoucherEffects = async (voucher, ledger) => {
   if (!voucher || !ledger) return;
 
+  // Reverse stock for all vouchers
+  const fine = getFineByMetal(voucher.items);
+  if (fine.gold > 0 || fine.silver > 0) {
+    await addBackToStock(voucher.userId, fine.gold, fine.silver);
+  }
+
+  // Skip balance updates for GST invoices - they don't affect ledger balance
+  if (voucher.invoiceType === 'gst' || ledger.ledgerType === 'gst') {
+    return;
+  }
+
   if (voucher.paymentType === 'credit') {
     voucher.items.forEach((item) => {
       if (item.metalType === 'gold') {
@@ -73,11 +84,6 @@ const reverseVoucherEffects = async (voucher, ledger) => {
 
     ledger.balances.creditBalance -= toNumber(voucher.total);
     ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
-
-    const fine = getFineByMetal(voucher.items);
-    if (fine.gold > 0 || fine.silver > 0) {
-      await addBackToStock(voucher.userId, fine.gold, fine.silver);
-    }
   } else if (voucher.paymentType === 'cash') {
     const shortfall = getCashShortfall(voucher.total, voucher.cashReceived);
     ledger.balances.cashBalance -= shortfall;
@@ -132,37 +138,44 @@ router.post('/', async (req, res) => {
       });
     }
 
-    if (!['cash', 'credit'].includes(paymentType)) {
+    // Allow settlement types
+    const allowedTypes = ['cash', 'credit', 'add_cash', 'add_gold', 'add_silver', 'money_to_gold', 'money_to_silver'];
+    if (!allowedTypes.includes(paymentType)) {
       return res.status(400).json({
         success: false,
-        message: 'paymentType must be either cash or credit'
+        message: 'Invalid paymentType'
       });
     }
 
-    const cleanedItems = items.map((item, index) => {
-      const cleaned = {
-        itemName: String(item.itemName || '').trim(),
-        metalType: item.metalType,
-        pieces: Math.max(1, Math.floor(toNumber(item.pieces, 1))),
-        grossWeight: toNumber(item.grossWeight),
-        lessWeight: Math.max(0, toNumber(item.lessWeight)),
-        netWeight: toNumber(item.netWeight),
-        melting: Math.max(0, toNumber(item.melting)),
-        wastage: Math.max(0, toNumber(item.wastage)),
-        fineWeight: toNumber(item.fineWeight),
-        labourRate: Math.max(0, toNumber(item.labourRate)),
-        amount: Math.max(0, toNumber(item.amount)),
-        hsnCode: item.hsnCode || (item.metalType === 'silver' ? '7106' : '7108')
-      };
-
-      if (!cleaned.itemName || !['gold', 'silver'].includes(cleaned.metalType)) {
-        throw badRequest(`Invalid item at row ${index + 1}`);
-      }
-      if (cleaned.grossWeight <= 0 || cleaned.netWeight <= 0 || cleaned.fineWeight < 0) {
-        throw badRequest(`Invalid weights at row ${index + 1}`);
-      }
-      return cleaned;
-    });
+    let cleanedItems = [];
+    if (['cash', 'credit'].includes(paymentType)) {
+      cleanedItems = items.map((item, index) => {
+        const cleaned = {
+          itemName: String(item.itemName || '').trim(),
+          metalType: item.metalType,
+          pieces: Math.max(1, Math.floor(toNumber(item.pieces, 1))),
+          grossWeight: toNumber(item.grossWeight),
+          lessWeight: Math.max(0, toNumber(item.lessWeight)),
+          netWeight: toNumber(item.netWeight),
+          melting: Math.max(0, toNumber(item.melting)),
+          wastage: Math.max(0, toNumber(item.wastage)),
+          fineWeight: toNumber(item.fineWeight),
+          labourRate: Math.max(0, toNumber(item.labourRate)),
+          amount: Math.max(0, toNumber(item.amount)),
+          hsnCode: item.hsnCode || (item.metalType === 'silver' ? '7106' : '7108')
+        };
+        if (!cleaned.itemName || !['gold', 'silver'].includes(cleaned.metalType)) {
+          throw badRequest(`Invalid item at row ${index + 1}`);
+        }
+        if (cleaned.grossWeight <= 0 || cleaned.netWeight <= 0 || cleaned.fineWeight < 0) {
+          throw badRequest(`Invalid weights at row ${index + 1}`);
+        }
+        return cleaned;
+      });
+    } else {
+      // For settlement types, no items required
+      cleanedItems = [];
+    }
 
     ledger = await Ledger.findOne({
       _id: ledgerId,
@@ -216,17 +229,7 @@ router.post('/', async (req, res) => {
       });
     }
 
-    const totals = cleanedItems.reduce((acc, item) => ({
-      pieces: acc.pieces + toNumber(item.pieces),
-      grossWeight: acc.grossWeight + toNumber(item.grossWeight),
-      lessWeight: acc.lessWeight + toNumber(item.lessWeight),
-      netWeight: acc.netWeight + toNumber(item.netWeight),
-      melting: acc.melting + toNumber(item.melting),
-      wastage: acc.wastage + toNumber(item.wastage),
-      fineWeight: acc.fineWeight + toNumber(item.fineWeight),
-      labourRate: acc.labourRate + toNumber(item.labourRate),
-      amount: acc.amount + toNumber(item.amount)
-    }), {
+    let totals = {
       pieces: 0,
       grossWeight: 0,
       lessWeight: 0,
@@ -236,15 +239,30 @@ router.post('/', async (req, res) => {
       fineWeight: 0,
       labourRate: 0,
       amount: 0
-    });
+    };
+    if (['cash', 'credit'].includes(paymentType)) {
+      totals = cleanedItems.reduce((acc, item) => ({
+        pieces: acc.pieces + toNumber(item.pieces),
+        grossWeight: acc.grossWeight + toNumber(item.grossWeight),
+        lessWeight: acc.lessWeight + toNumber(item.lessWeight),
+        netWeight: acc.netWeight + toNumber(item.netWeight),
+        melting: acc.melting + toNumber(item.melting),
+        wastage: acc.wastage + toNumber(item.wastage),
+        fineWeight: acc.fineWeight + toNumber(item.fineWeight),
+        labourRate: acc.labourRate + toNumber(item.labourRate),
+        amount: acc.amount + toNumber(item.amount)
+      }), totals);
+    }
 
     const oldBalance = {
-      amount: paymentType === 'cash' ? toNumber(ledger.balances.cashBalance) : toNumber(ledger.balances.creditBalance),
+      amount: paymentType === 'cash' ? toNumber(ledger.balances.cashBalance)
+        : paymentType === 'credit' ? toNumber(ledger.balances.creditBalance)
+        : toNumber(ledger.balances.creditBalance),
       fineWeight: toNumber(ledger.balances.goldFineWeight) + toNumber(ledger.balances.silverFineWeight)
     };
 
-    const stone = Math.max(0, toNumber(stoneAmount));
-    const fineAdj = Math.max(0, toNumber(fineAmount));
+    const stone = toNumber(stoneAmount);
+    const fineAdj = toNumber(fineAmount);
     const taxableValue = totals.amount + stone;
 
     let gstType = gstDetails?.gstType;
@@ -257,25 +275,39 @@ router.post('/', async (req, res) => {
     }
     const gstCalc = calculateGSTBreakdown(taxableValue, gstRate, gstType);
 
-    const totalBeforeGST = totals.amount + stone + fineAdj;
-    const total = totalBeforeGST + toNumber(gstCalc.totalGST);
+    let totalBeforeGST = totals.amount + stone + fineAdj;
+    let total = totalBeforeGST + toNumber(gstCalc.totalGST);
+    if (['add_cash', 'add_gold', 'add_silver', 'money_to_gold', 'money_to_silver'].includes(paymentType)) {
+      total = toNumber(cashReceived);
+    }
 
-    const currentBalance = {
+    let currentBalance = {
       amount: 0,
       netWeight: totals.netWeight
     };
-
     if (paymentType === 'credit') {
       currentBalance.amount = oldBalance.amount + total;
-    } else {
+    } else if (paymentType === 'cash') {
       const shortfall = getCashShortfall(total, cashReceived);
       currentBalance.amount = oldBalance.amount + shortfall;
+    } else if (paymentType === 'add_cash') {
+      currentBalance.amount = oldBalance.amount - total; // Subtract from balance
+    } else if (paymentType === 'add_gold') {
+      currentBalance.amount = oldBalance.amount;
+      // handled below
+    } else if (paymentType === 'add_silver') {
+      currentBalance.amount = oldBalance.amount;
+      // handled below
+    } else if (paymentType === 'money_to_gold' || paymentType === 'money_to_silver') {
+      currentBalance.amount = oldBalance.amount - total; // Subtract cash, add fine below
     }
 
-    deductedFine = getFineByMetal(cleanedItems);
-    if (paymentType === 'credit' && (deductedFine.gold > 0 || deductedFine.silver > 0)) {
-      await deductFromStock(req.userId, deductedFine.gold, deductedFine.silver);
-      stockAdjusted = true;
+    if (['cash', 'credit'].includes(paymentType)) {
+      deductedFine = getFineByMetal(cleanedItems);
+      if (deductedFine.gold > 0 || deductedFine.silver > 0) {
+        await deductFromStock(req.userId, deductedFine.gold, deductedFine.silver);
+        stockAdjusted = true;
+      }
     }
 
     voucher = new Voucher({
@@ -338,21 +370,35 @@ router.post('/', async (req, res) => {
     };
     previousHasVouchers = ledger.hasVouchers;
 
-    if (paymentType === 'credit') {
-      cleanedItems.forEach((item) => {
-        if (item.metalType === 'gold') {
-          ledger.balances.goldFineWeight += toNumber(item.fineWeight);
-        } else if (item.metalType === 'silver') {
-          ledger.balances.silverFineWeight += toNumber(item.fineWeight);
-        }
-      });
-
-      ledger.balances.creditBalance = currentBalance.amount;
-    } else {
-      ledger.balances.cashBalance = currentBalance.amount;
+    // Skip balance updates for GST invoices or GST-type ledgers
+    if (invoiceType !== 'gst' && ledger.ledgerType !== 'gst') {
+      if (paymentType === 'credit') {
+        cleanedItems.forEach((item) => {
+          if (item.metalType === 'gold') {
+            ledger.balances.goldFineWeight += toNumber(item.fineWeight);
+          } else if (item.metalType === 'silver') {
+            ledger.balances.silverFineWeight += toNumber(item.fineWeight);
+          }
+        });
+        ledger.balances.creditBalance = currentBalance.amount;
+      } else if (paymentType === 'cash') {
+        ledger.balances.cashBalance = currentBalance.amount;
+      } else if (paymentType === 'add_cash') {
+        ledger.balances.creditBalance = currentBalance.amount;
+      } else if (paymentType === 'add_gold') {
+        ledger.balances.goldFineWeight += toNumber(cashReceived);
+      } else if (paymentType === 'add_silver') {
+        ledger.balances.silverFineWeight += toNumber(cashReceived);
+      } else if (paymentType === 'money_to_gold') {
+        ledger.balances.creditBalance = currentBalance.amount;
+        ledger.balances.goldFineWeight += (toNumber(cashReceived) / (toNumber(goldRate) || 1));
+      } else if (paymentType === 'money_to_silver') {
+        ledger.balances.creditBalance = currentBalance.amount;
+        ledger.balances.silverFineWeight += (toNumber(cashReceived) / (toNumber(silverRate) || 1));
+      }
+      ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
     }
 
-    ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
     ledger.hasVouchers = true;
     await ledger.save();
 
@@ -368,17 +414,17 @@ router.post('/', async (req, res) => {
     });
   } catch (error) {
     if (voucher?._id) {
-      await Voucher.findByIdAndDelete(voucher._id).catch(() => {});
+      await Voucher.findByIdAndDelete(voucher._id).catch(() => { });
     }
 
     if (ledger && previousLedgerState) {
       ledger.balances = previousLedgerState;
       ledger.hasVouchers = previousHasVouchers;
-      await ledger.save().catch(() => {});
+      await ledger.save().catch(() => { });
     }
 
     if (stockAdjusted && (deductedFine.gold > 0 || deductedFine.silver > 0)) {
-      await addBackToStock(req.userId, deductedFine.gold, deductedFine.silver).catch(() => {});
+      await addBackToStock(req.userId, deductedFine.gold, deductedFine.silver).catch(() => { });
     }
 
     console.error('Create voucher error:', error);

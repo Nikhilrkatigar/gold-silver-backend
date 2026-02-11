@@ -8,14 +8,26 @@ const ledgerSchema = new mongoose.Schema({
   },
   phoneNumber: {
     type: String,
-    required: true,
+    required: false,
     trim: true,
-    match: [/^[0-9]{10}$/, 'Phone number must be 10 digits']
+    validate: {
+      validator: function (v) {
+        // Allow empty string or 10 digits
+        if (!v || v === '') return true;
+        return /^[0-9]{10}$/.test(v);
+      },
+      message: 'Phone number must be 10 digits or empty'
+    }
   },
   userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
+  },
+  ledgerType: {
+    type: String,
+    enum: ['regular', 'gst'],
+    default: 'regular'
   },
   gstDetails: {
     hasGST: {
@@ -27,7 +39,7 @@ const ledgerSchema = new mongoose.Schema({
       trim: true,
       sparse: true,
       validate: {
-        validator: function(v) {
+        validator: function (v) {
           if (!v) return !this.gstDetails.hasGST;
           // Format: 2 digits (state) + 5 letters (PAN) + 4 digits (entity) + 4 alphanumeric (check/filler)
           return /^\d{2}[A-Z]{5}\d{4}[A-Z0-9]{4}$/.test(v);
@@ -88,5 +100,6 @@ ledgerSchema.pre('validate', function normalizeFields(next) {
 // Index for faster queries
 ledgerSchema.index({ userId: 1, name: 1 });
 ledgerSchema.index({ userId: 1, phoneNumber: 1 });
+ledgerSchema.index({ userId: 1, ledgerType: 1 });
 
 module.exports = mongoose.model('Ledger', ledgerSchema);

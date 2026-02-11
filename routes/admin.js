@@ -99,9 +99,75 @@ router.post('/users', async (req, res) => {
 router.get('/users', async (req, res) => {
   try {
     const users = await User.find({ role: 'user' }).select('-password').sort({ createdAt: -1 });
+
+    // Calculate storage usage for each user (in bytes)
+    const usersWithStorage = await Promise.all(
+      users.map(async (user) => {
+        // Calculate collection size by fetching documents and measuring their size
+        const calculateCollectionSize = async (Model) => {
+          try {
+            const documents = await Model.find({ userId: user._id }).lean();
+
+            if (documents.length === 0) {
+              return { totalSize: 0, count: 0 };
+            }
+
+            // Calculate size by converting to JSON and measuring byte length
+            const totalSize = documents.reduce((sum, doc) => {
+              // Convert to JSON string and get byte length
+              const jsonString = JSON.stringify(doc);
+              const byteLength = Buffer.byteLength(jsonString, 'utf8');
+              // Add ~20% overhead for BSON vs JSON (indexes, metadata, etc.)
+              return sum + Math.ceil(byteLength * 1.2);
+            }, 0);
+
+            return { totalSize, count: documents.length };
+          } catch (error) {
+            console.error(`Error calculating size for ${Model.modelName}:`, error);
+            return { totalSize: 0, count: 0 };
+          }
+        };
+
+        const [ledgerData, voucherData, settlementData, karigarData, stockData, stockInputData] = await Promise.all([
+          calculateCollectionSize(Ledger),
+          calculateCollectionSize(Voucher),
+          calculateCollectionSize(Settlement),
+          calculateCollectionSize(Karigar),
+          calculateCollectionSize(Stock),
+          calculateCollectionSize(StockInput)
+        ]);
+
+        const totalBytes =
+          ledgerData.totalSize +
+          voucherData.totalSize +
+          settlementData.totalSize +
+          karigarData.totalSize +
+          stockData.totalSize +
+          stockInputData.totalSize;
+
+        return {
+          ...mapUser(user),
+          storageUsage: {
+            totalBytes: totalBytes,
+            totalKB: (totalBytes / 1024).toFixed(2),
+            totalMB: (totalBytes / (1024 * 1024)).toFixed(2),
+            totalGB: (totalBytes / (1024 * 1024 * 1024)).toFixed(4),
+            breakdown: {
+              ledgers: { bytes: ledgerData.totalSize, count: ledgerData.count },
+              vouchers: { bytes: voucherData.totalSize, count: voucherData.count },
+              settlements: { bytes: settlementData.totalSize, count: settlementData.count },
+              karigars: { bytes: karigarData.totalSize, count: karigarData.count },
+              stock: { bytes: stockData.totalSize, count: stockData.count },
+              stockInputs: { bytes: stockInputData.totalSize, count: stockInputData.count }
+            }
+          }
+        };
+      })
+    );
+
     return res.json({
       success: true,
-      users: users.map(mapUser)
+      users: usersWithStorage
     });
   } catch (error) {
     console.error('Get users error:', error);

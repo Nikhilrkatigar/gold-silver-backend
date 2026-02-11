@@ -29,11 +29,13 @@ router.post('/', async (req, res) => {
       metalRate,
       narration,
       date,
-      direction = 'payment'
+      direction = 'payment',
+      isMoneyConversion = false // Flag for money_to_gold/money_to_silver
     } = req.body;
 
     fineGiven = toNumber(req.body.fineGiven);
     const rate = toNumber(metalRate);
+    const requestAmount = toNumber(req.body.amount);
 
     if (!ledgerId || !['gold', 'silver'].includes(metalType) || !['payment', 'receipt'].includes(direction)) {
       return res.status(400).json({
@@ -42,12 +44,7 @@ router.post('/', async (req, res) => {
       });
     }
 
-    if (fineGiven <= 0 || rate <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'fineGiven and metalRate must be greater than zero'
-      });
-    }
+    // Allow negative fineGiven and metalRate for settlement adjustments
 
     const ledger = await Ledger.findOne({
       _id: ledgerId,
@@ -64,23 +61,34 @@ router.post('/', async (req, res) => {
       ? toNumber(ledger.balances.goldFineWeight)
       : toNumber(ledger.balances.silverFineWeight);
 
-    const amount = fineGiven * rate;
+    const amount = isMoneyConversion ? requestAmount : fineGiven * rate;
 
-    if (direction === 'payment' && balanceBeforeFine < fineGiven) {
+    // For money conversions, we need credit balance for the cash amount
+    if (isMoneyConversion && toNumber(ledger.balances.creditBalance) < amount) {
       return res.status(400).json({
         success: false,
-        message: 'Insufficient balance for settlement'
+        message: 'Insufficient cash balance for money conversion'
       });
     }
 
-    if (direction === 'payment' && toNumber(ledger.balances.creditBalance) < amount) {
-      return res.status(400).json({
-        success: false,
-        message: 'Settlement amount exceeds pending credit balance'
-      });
+    // For regular settlements (non-money-conversion), check existing rules
+    if (!isMoneyConversion) {
+      if (direction === 'payment' && balanceBeforeFine < fineGiven) {
+        return res.status(400).json({
+          success: false,
+          message: 'Insufficient balance for settlement'
+        });
+      }
+
+      if (direction === 'payment' && toNumber(ledger.balances.creditBalance) < amount) {
+        return res.status(400).json({
+          success: false,
+          message: 'Settlement amount exceeds pending credit balance'
+        });
+      }
     }
 
-    if (direction === 'payment') {
+    if (direction === 'payment' && !isMoneyConversion) {
       if (metalType === 'gold') {
         await deductFromStock(req.userId, fineGiven, 0);
       } else {
@@ -88,7 +96,16 @@ router.post('/', async (req, res) => {
       }
       stockAdjusted = true;
       stockAction = 'deduct';
-    } else {
+    } else if (direction === 'receipt' && !isMoneyConversion) {
+      if (metalType === 'gold') {
+        await addBackToStock(req.userId, fineGiven, 0);
+      } else {
+        await addBackToStock(req.userId, 0, fineGiven);
+      }
+      stockAdjusted = true;
+      stockAction = 'add';
+    } else if (isMoneyConversion) {
+      // For money conversion, always add to stock (customer is giving cash to receive fine)
       if (metalType === 'gold') {
         await addBackToStock(req.userId, fineGiven, 0);
       } else {
@@ -101,8 +118,12 @@ router.post('/', async (req, res) => {
     const fineMultiplier = direction === 'receipt' ? 1 : -1;
     const amountMultiplier = direction === 'receipt' ? 1 : -1;
 
-    const updatedFine = balanceBeforeFine + (fineMultiplier * fineGiven);
-    const updatedCredit = toNumber(ledger.balances.creditBalance) + (amountMultiplier * amount);
+    // For money conversions, use asymmetric multipliers
+    const finalFineMultiplier = isMoneyConversion ? 1 : fineMultiplier; // Always add fine
+    const finalAmountMultiplier = isMoneyConversion ? -1 : amountMultiplier; // Always deduct amount
+
+    const updatedFine = balanceBeforeFine + (finalFineMultiplier * fineGiven);
+    const updatedCredit = toNumber(ledger.balances.creditBalance) + (finalAmountMultiplier * amount);
 
     if (updatedFine < 0 || updatedCredit < 0) {
       if (stockAdjusted) {

@@ -147,7 +147,7 @@ const voucherSchema = new mongoose.Schema({
   },
   paymentType: {
     type: String,
-    enum: ['cash', 'credit'],
+    enum: ['cash', 'credit', 'add_cash', 'add_gold', 'add_silver', 'money_to_gold', 'money_to_silver'],
     required: true
   },
   goldRate: {

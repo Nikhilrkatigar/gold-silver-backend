@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const stockInputSchema = new mongoose.Schema({
   gold: { type: Number, default: 0 },
   silver: { type: Number, default: 0 },
+  cashAmount: { type: Number, default: 0 },
   date: { type: Date, default: Date.now },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 });
@@ -13,6 +14,7 @@ const stockSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
   gold: { type: Number, default: 0 },
   silver: { type: Number, default: 0 },
+  cashInHand: { type: Number, default: 0 },
   updatedAt: { type: Date, default: Date.now },
 });
 
