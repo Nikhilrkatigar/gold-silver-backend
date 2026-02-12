@@ -443,7 +443,8 @@ router.post('/:id/recalculate-balance', async (req, res) => {
             ledger.balances.silverFineWeight += toNumber(item.fineWeight);
           }
         });
-        ledger.balances.creditBalance += toNumber(voucher.total);
+        // Credit bills use cashBalance, not creditBalance
+        ledger.balances.cashBalance += toNumber(voucher.total);
       } else if (voucher.paymentType === 'cash') {
         const shortfall = Math.max(0, toNumber(voucher.total) - toNumber(voucher.cashReceived));
         ledger.balances.cashBalance += shortfall;

@@ -121,7 +121,8 @@ const reverseVoucherEffects = async (voucher, ledger) => {
         ledger.balances.silverFineWeight -= toNumber(item.fineWeight);
       }
     });
-    ledger.balances.creditBalance -= toNumber(voucher.total);
+    // Credit bills use cashBalance, not creditBalance
+    ledger.balances.cashBalance -= toNumber(voucher.total);
     ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
   } else if (voucher.paymentType === 'cash') {
     const shortfall = getCashShortfall(voucher.total, voucher.cashReceived);
@@ -309,10 +310,10 @@ router.post('/', async (req, res) => {
 
     const oldBalance = {
       amount: paymentType === 'cash' ? toNumber(ledger.balances.cashBalance)
-        : paymentType === 'credit' ? toNumber(ledger.balances.creditBalance)
-        : paymentType === 'add_cash' ? (toNumber(ledger.balances.cashBalance) || toNumber(ledger.balances.creditBalance)) // Use cashBalance for regular ledgers, creditBalance as fallback
-        : paymentType === 'money_to_gold' || paymentType === 'money_to_silver' ? (toNumber(ledger.balances.cashBalance) || toNumber(ledger.balances.creditBalance)) // Use appropriate balance
-        : toNumber(ledger.balances.creditBalance),
+        : paymentType === 'credit' ? toNumber(ledger.balances.cashBalance) // Credit bills use cashBalance
+          : paymentType === 'add_cash' ? (toNumber(ledger.balances.cashBalance) || toNumber(ledger.balances.creditBalance)) // Use cashBalance for regular ledgers, creditBalance as fallback
+            : paymentType === 'money_to_gold' || paymentType === 'money_to_silver' ? (toNumber(ledger.balances.cashBalance) || toNumber(ledger.balances.creditBalance)) // Use appropriate balance
+              : toNumber(ledger.balances.cashBalance), // Default to cashBalance
       fineWeight: toNumber(ledger.balances.goldFineWeight) + toNumber(ledger.balances.silverFineWeight)
     };
 
@@ -430,10 +431,10 @@ router.post('/', async (req, res) => {
       cashBalance: toNumber(freshLedger.balances.cashBalance),
       creditBalance: toNumber(freshLedger.balances.creditBalance)
     };
-    
+
     // IMPORTANT: Save previousLedgerState to voucher for proper reversal on delete
     voucher.previousLedgerState = previousLedgerState;
-    
+
     previousHasVouchers = freshLedger.hasVouchers;
 
     // Skip balance updates for GST invoices or GST-type ledgers
@@ -446,7 +447,8 @@ router.post('/', async (req, res) => {
             freshLedger.balances.silverFineWeight += toNumber(item.fineWeight);
           }
         });
-        freshLedger.balances.creditBalance = currentBalance.amount;
+        // Credit bills should update cashBalance, not creditBalance
+        freshLedger.balances.cashBalance = currentBalance.amount;
       } else if (paymentType === 'cash') {
         freshLedger.balances.cashBalance = currentBalance.amount;
       } else if (paymentType === 'add_cash') {
