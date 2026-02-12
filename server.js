@@ -52,6 +52,7 @@ app.use('/api/voucher', require('./routes/voucher'));
 app.use('/api/settlement', require('./routes/settlement'));
 app.use('/api/stock', require('./routes/stock'));
 app.use('/api/karigar', require('./routes/karigar'));
+app.use('/api/expense', require('./routes/expense'));
 
 app.get('/api/health', (req, res) => {
   res.json({

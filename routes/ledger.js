@@ -447,6 +447,26 @@ router.post('/:id/recalculate-balance', async (req, res) => {
       } else if (voucher.paymentType === 'cash') {
         const shortfall = Math.max(0, toNumber(voucher.total) - toNumber(voucher.cashReceived));
         ledger.balances.cashBalance += shortfall;
+      } else if (voucher.paymentType === 'add_cash') {
+        // Settlement: Add cash to balance
+        const amountToAdd = toNumber(voucher.cashReceived);
+        ledger.balances.cashBalance -= amountToAdd;
+      } else if (voucher.paymentType === 'add_gold') {
+        // Settlement: Customer gives gold to settle debt - reduces gold owed
+        ledger.balances.goldFineWeight -= toNumber(voucher.cashReceived);
+      } else if (voucher.paymentType === 'add_silver') {
+        // Settlement: Customer gives silver to settle debt - reduces silver owed
+        ledger.balances.silverFineWeight -= toNumber(voucher.cashReceived);
+      } else if (voucher.paymentType === 'money_to_gold') {
+        // Settlement: Customer pays cash to settle gold fine debt
+        const amountPaid = toNumber(voucher.cashReceived);
+        const goldRate = toNumber(voucher.goldRate) || 1;
+        ledger.balances.goldFineWeight -= (amountPaid / goldRate);
+      } else if (voucher.paymentType === 'money_to_silver') {
+        // Settlement: Customer pays cash to settle silver fine debt
+        const amountPaid = toNumber(voucher.cashReceived);
+        const silverRate = toNumber(voucher.silverRate) || 1;
+        ledger.balances.silverFineWeight -= (amountPaid / silverRate);
       }
     });
 

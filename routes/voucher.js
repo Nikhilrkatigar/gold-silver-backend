@@ -62,17 +62,57 @@ const getFineByMetal = (items = []) => items.reduce(
 const reverseVoucherEffects = async (voucher, ledger) => {
   if (!voucher || !ledger) return;
 
+  // If voucher has previousLedgerState saved, use it to restore the exact previous state
+  if (voucher.previousLedgerState) {
+    ledger.balances.goldFineWeight = toNumber(voucher.previousLedgerState.goldFineWeight);
+    ledger.balances.silverFineWeight = toNumber(voucher.previousLedgerState.silverFineWeight);
+    ledger.balances.amount = toNumber(voucher.previousLedgerState.amount);
+    ledger.balances.cashBalance = toNumber(voucher.previousLedgerState.cashBalance);
+    ledger.balances.creditBalance = toNumber(voucher.previousLedgerState.creditBalance);
+    return;
+  }
+
+  // Fallback for vouchers without previousLedgerState (old vouchers)
   // Reverse stock for all vouchers
   const fine = getFineByMetal(voucher.items);
   if (fine.gold > 0 || fine.silver > 0) {
     await addBackToStock(voucher.userId, fine.gold, fine.silver);
   }
 
-  // Skip balance updates for GST invoices - they don't affect ledger balance
+  // Skip balance updates for GST invoices
   if (voucher.invoiceType === 'gst' || ledger.ledgerType === 'gst') {
     return;
   }
 
+  // Handle settlement types (add_cash, add_gold, add_silver, money_to_gold, money_to_silver)
+  if (['add_cash', 'add_gold', 'add_silver', 'money_to_gold', 'money_to_silver'].includes(voucher.paymentType)) {
+    if (voucher.paymentType === 'add_cash') {
+      const amountToReverse = toNumber(voucher.cashReceived);
+      if (toNumber(ledger.balances.cashBalance) !== 0 || toNumber(ledger.balances.creditBalance) === 0) {
+        ledger.balances.cashBalance -= amountToReverse;
+      } else {
+        ledger.balances.creditBalance -= amountToReverse;
+      }
+    } else if (voucher.paymentType === 'add_gold') {
+      // Reverse: Add back the fine that was subtracted when settlement was created
+      ledger.balances.goldFineWeight += toNumber(voucher.cashReceived);
+    } else if (voucher.paymentType === 'add_silver') {
+      // Reverse: Add back the fine that was subtracted when settlement was created
+      ledger.balances.silverFineWeight += toNumber(voucher.cashReceived);
+    } else if (voucher.paymentType === 'money_to_gold') {
+      // Reverse: Add back the fine that was settled
+      const amountToReverse = toNumber(voucher.cashReceived);
+      ledger.balances.goldFineWeight += (amountToReverse / (toNumber(voucher.goldRate) || 1));
+    } else if (voucher.paymentType === 'money_to_silver') {
+      // Reverse: Add back the fine that was settled
+      const amountToReverse = toNumber(voucher.cashReceived);
+      ledger.balances.silverFineWeight += (amountToReverse / (toNumber(voucher.silverRate) || 1));
+    }
+    ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
+    return;
+  }
+
+  // Handle regular billing vouchers
   if (voucher.paymentType === 'credit') {
     voucher.items.forEach((item) => {
       if (item.metalType === 'gold') {
@@ -81,7 +121,6 @@ const reverseVoucherEffects = async (voucher, ledger) => {
         ledger.balances.silverFineWeight -= toNumber(item.fineWeight);
       }
     });
-
     ledger.balances.creditBalance -= toNumber(voucher.total);
     ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
   } else if (voucher.paymentType === 'cash') {
@@ -131,20 +170,34 @@ router.post('/', async (req, res) => {
       gstDetails
     } = req.body;
 
-    if (!ledgerId || !Array.isArray(items) || items.length === 0) {
+    // Allow settlement types
+    const allowedTypes = ['cash', 'credit', 'add_cash', 'add_gold', 'add_silver', 'money_to_gold', 'money_to_silver'];
+    const isSettlementType = ['add_cash', 'add_gold', 'add_silver', 'money_to_gold', 'money_to_silver'].includes(paymentType);
+
+    // Validate ledgerId is always required
+    if (!ledgerId) {
       return res.status(400).json({
         success: false,
-        message: 'Ledger and at least one item are required'
+        message: 'Ledger is required'
       });
     }
 
-    // Allow settlement types
-    const allowedTypes = ['cash', 'credit', 'add_cash', 'add_gold', 'add_silver', 'money_to_gold', 'money_to_silver'];
+    // Validate paymentType
     if (!allowedTypes.includes(paymentType)) {
       return res.status(400).json({
         success: false,
         message: 'Invalid paymentType'
       });
+    }
+
+    // For non-settlement types, items are required
+    if (!isSettlementType) {
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'At least one item is required for this payment type'
+        });
+      }
     }
 
     let cleanedItems = [];
@@ -257,6 +310,8 @@ router.post('/', async (req, res) => {
     const oldBalance = {
       amount: paymentType === 'cash' ? toNumber(ledger.balances.cashBalance)
         : paymentType === 'credit' ? toNumber(ledger.balances.creditBalance)
+        : paymentType === 'add_cash' ? (toNumber(ledger.balances.cashBalance) || toNumber(ledger.balances.creditBalance)) // Use cashBalance for regular ledgers, creditBalance as fallback
+        : paymentType === 'money_to_gold' || paymentType === 'money_to_silver' ? (toNumber(ledger.balances.cashBalance) || toNumber(ledger.balances.creditBalance)) // Use appropriate balance
         : toNumber(ledger.balances.creditBalance),
       fineWeight: toNumber(ledger.balances.goldFineWeight) + toNumber(ledger.balances.silverFineWeight)
     };
@@ -361,46 +416,67 @@ router.post('/', async (req, res) => {
 
     await voucher.save();
 
+    // Re-fetch ledger to get the latest state before updating balance
+    // This prevents race conditions when multiple vouchers are created simultaneously
+    const freshLedger = await Ledger.findById(ledger._id);
+    if (!freshLedger) {
+      throw new Error('Ledger not found after voucher creation');
+    }
+
     previousLedgerState = {
-      goldFineWeight: toNumber(ledger.balances.goldFineWeight),
-      silverFineWeight: toNumber(ledger.balances.silverFineWeight),
-      amount: toNumber(ledger.balances.amount),
-      cashBalance: toNumber(ledger.balances.cashBalance),
-      creditBalance: toNumber(ledger.balances.creditBalance)
+      goldFineWeight: toNumber(freshLedger.balances.goldFineWeight),
+      silverFineWeight: toNumber(freshLedger.balances.silverFineWeight),
+      amount: toNumber(freshLedger.balances.amount),
+      cashBalance: toNumber(freshLedger.balances.cashBalance),
+      creditBalance: toNumber(freshLedger.balances.creditBalance)
     };
-    previousHasVouchers = ledger.hasVouchers;
+    
+    // IMPORTANT: Save previousLedgerState to voucher for proper reversal on delete
+    voucher.previousLedgerState = previousLedgerState;
+    
+    previousHasVouchers = freshLedger.hasVouchers;
 
     // Skip balance updates for GST invoices or GST-type ledgers
-    if (invoiceType !== 'gst' && ledger.ledgerType !== 'gst') {
+    if (invoiceType !== 'gst' && freshLedger.ledgerType !== 'gst') {
       if (paymentType === 'credit') {
         cleanedItems.forEach((item) => {
           if (item.metalType === 'gold') {
-            ledger.balances.goldFineWeight += toNumber(item.fineWeight);
+            freshLedger.balances.goldFineWeight += toNumber(item.fineWeight);
           } else if (item.metalType === 'silver') {
-            ledger.balances.silverFineWeight += toNumber(item.fineWeight);
+            freshLedger.balances.silverFineWeight += toNumber(item.fineWeight);
           }
         });
-        ledger.balances.creditBalance = currentBalance.amount;
+        freshLedger.balances.creditBalance = currentBalance.amount;
       } else if (paymentType === 'cash') {
-        ledger.balances.cashBalance = currentBalance.amount;
+        freshLedger.balances.cashBalance = currentBalance.amount;
       } else if (paymentType === 'add_cash') {
-        ledger.balances.creditBalance = currentBalance.amount;
+        // For add_cash, determine which balance to update based on which one is being used
+        if (toNumber(freshLedger.balances.cashBalance) !== 0 || toNumber(freshLedger.balances.creditBalance) === 0) {
+          freshLedger.balances.cashBalance = currentBalance.amount;
+        } else {
+          freshLedger.balances.creditBalance = currentBalance.amount;
+        }
       } else if (paymentType === 'add_gold') {
-        ledger.balances.goldFineWeight += toNumber(cashReceived);
+        // Customer gives gold to settle debt - reduces gold owed
+        freshLedger.balances.goldFineWeight -= toNumber(cashReceived);
       } else if (paymentType === 'add_silver') {
-        ledger.balances.silverFineWeight += toNumber(cashReceived);
+        // Customer gives silver to settle debt - reduces silver owed
+        freshLedger.balances.silverFineWeight -= toNumber(cashReceived);
       } else if (paymentType === 'money_to_gold') {
-        ledger.balances.creditBalance = currentBalance.amount;
-        ledger.balances.goldFineWeight += (toNumber(cashReceived) / (toNumber(goldRate) || 1));
+        // Customer pays cash to settle gold fine debt - reduces gold owed
+        freshLedger.balances.goldFineWeight -= (toNumber(cashReceived) / (toNumber(goldRate) || 1));
       } else if (paymentType === 'money_to_silver') {
-        ledger.balances.creditBalance = currentBalance.amount;
-        ledger.balances.silverFineWeight += (toNumber(cashReceived) / (toNumber(silverRate) || 1));
+        // Customer pays cash to settle silver fine debt - reduces silver owed
+        freshLedger.balances.silverFineWeight -= (toNumber(cashReceived) / (toNumber(silverRate) || 1));
       }
-      ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
+      freshLedger.balances.amount = calculateUnifiedAmount(freshLedger.balances);
     }
 
-    ledger.hasVouchers = true;
-    await ledger.save();
+    freshLedger.hasVouchers = true;
+    await freshLedger.save();
+
+    // Save the voucher with previousLedgerState for proper deletion reversal
+    await voucher.save();
 
     if (shouldAutoIncrement) {
       user.voucherSettings.currentVoucherNumber = toNumber(user.voucherSettings.currentVoucherNumber, 1) + 1;
