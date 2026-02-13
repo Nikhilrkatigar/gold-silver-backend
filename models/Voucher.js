@@ -192,6 +192,22 @@ const voucherSchema = new mongoose.Schema({
     amount: { type: Number, default: 0 },
     netWeight: { type: Number, default: 0 }
   },
+  balanceSnapshot: {
+    // Old balance at time of saving
+    oldBalance: {
+      creditAmount: { type: Number, default: 0 },
+      cashAmount: { type: Number, default: 0 },
+      totalAmount: { type: Number, default: 0 },
+      goldFineWeight: { type: Number, default: 0 },
+      silverFineWeight: { type: Number, default: 0 }
+    },
+    // Current balance at time of saving
+    currentBalance: {
+      amount: { type: Number, default: 0 },
+      goldFineWeight: { type: Number, default: 0 },
+      silverFineWeight: { type: Number, default: 0 }
+    }
+  },
   total: {
     type: Number,
     required: true

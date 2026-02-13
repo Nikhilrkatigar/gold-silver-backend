@@ -12,6 +12,29 @@ const toNumber = (value, fallback = 0) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
+const pickNumber = (...values) => {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return 0;
+};
+
+const sanitizeBalanceSnapshot = (incomingSnapshot, fallbackSnapshot) => ({
+  oldBalance: {
+    creditAmount: pickNumber(incomingSnapshot?.oldBalance?.creditAmount, fallbackSnapshot.oldBalance.creditAmount),
+    cashAmount: pickNumber(incomingSnapshot?.oldBalance?.cashAmount, fallbackSnapshot.oldBalance.cashAmount),
+    totalAmount: pickNumber(incomingSnapshot?.oldBalance?.totalAmount, fallbackSnapshot.oldBalance.totalAmount),
+    goldFineWeight: pickNumber(incomingSnapshot?.oldBalance?.goldFineWeight, fallbackSnapshot.oldBalance.goldFineWeight),
+    silverFineWeight: pickNumber(incomingSnapshot?.oldBalance?.silverFineWeight, fallbackSnapshot.oldBalance.silverFineWeight)
+  },
+  currentBalance: {
+    amount: pickNumber(incomingSnapshot?.currentBalance?.amount, fallbackSnapshot.currentBalance.amount),
+    goldFineWeight: pickNumber(incomingSnapshot?.currentBalance?.goldFineWeight, fallbackSnapshot.currentBalance.goldFineWeight),
+    silverFineWeight: pickNumber(incomingSnapshot?.currentBalance?.silverFineWeight, fallbackSnapshot.currentBalance.silverFineWeight)
+  }
+});
+
 const badRequest = (message) => {
   const error = new Error(message);
   error.status = 400;
@@ -168,7 +191,8 @@ router.post('/', async (req, res) => {
       transport,
       transportId,
       deliveryLocation,
-      gstDetails
+      gstDetails,
+      balanceSnapshot: incomingBalanceSnapshot
     } = req.body;
 
     // Allow settlement types
@@ -366,6 +390,50 @@ router.post('/', async (req, res) => {
       }
     }
 
+    const oldCreditAmount = toNumber(ledger.balances.creditBalance);
+    const oldCashAmount = toNumber(ledger.balances.cashBalance);
+    const oldGoldFineWeight = toNumber(ledger.balances.goldFineWeight);
+    const oldSilverFineWeight = toNumber(ledger.balances.silverFineWeight);
+
+    let currentGoldFineWeight = oldGoldFineWeight;
+    let currentSilverFineWeight = oldSilverFineWeight;
+
+    if (paymentType === 'credit') {
+      currentGoldFineWeight += deductedFine.gold;
+      currentSilverFineWeight += deductedFine.silver;
+    } else if (paymentType === 'add_gold') {
+      currentGoldFineWeight -= toNumber(cashReceived);
+    } else if (paymentType === 'add_silver') {
+      currentSilverFineWeight -= toNumber(cashReceived);
+    } else if (paymentType === 'money_to_gold') {
+      currentGoldFineWeight -= (toNumber(cashReceived) / (toNumber(goldRate) || 1));
+    } else if (paymentType === 'money_to_silver') {
+      currentSilverFineWeight -= (toNumber(cashReceived) / (toNumber(silverRate) || 1));
+    }
+
+    const fallbackCurrentAmount = paymentType === 'credit'
+      ? (oldCreditAmount + oldCashAmount + total)
+      : paymentType === 'cash'
+        ? (oldCashAmount + getCashShortfall(total, cashReceived))
+        : currentBalance.amount;
+
+    const fallbackBalanceSnapshot = {
+      oldBalance: {
+        creditAmount: oldCreditAmount,
+        cashAmount: oldCashAmount,
+        totalAmount: oldCreditAmount + oldCashAmount,
+        goldFineWeight: oldGoldFineWeight,
+        silverFineWeight: oldSilverFineWeight
+      },
+      currentBalance: {
+        amount: fallbackCurrentAmount,
+        goldFineWeight: currentGoldFineWeight,
+        silverFineWeight: currentSilverFineWeight
+      }
+    };
+
+    const balanceSnapshot = sanitizeBalanceSnapshot(incomingBalanceSnapshot, fallbackBalanceSnapshot);
+
     voucher = new Voucher({
       voucherNumber: finalVoucherNumber,
       userId: req.userId,
@@ -386,6 +454,7 @@ router.post('/', async (req, res) => {
       receipt: receipt || { gross: 0 },
       oldBalance,
       currentBalance,
+      balanceSnapshot,
       total,
       cashReceived: toNumber(cashReceived),
       narration: narration || '',
