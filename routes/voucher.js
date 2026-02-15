@@ -238,16 +238,14 @@ router.post('/', async (req, res) => {
           melting: Math.max(0, toNumber(item.melting)),
           wastage: Math.max(0, toNumber(item.wastage)),
           fineWeight: toNumber(item.fineWeight),
-          labourRate: Math.max(0, toNumber(item.labourRate)),
-          amount: Math.max(0, toNumber(item.amount)),
+          labourRate: toNumber(item.labourRate),
+          amount: toNumber(item.amount),
           hsnCode: item.hsnCode || (item.metalType === 'silver' ? '7106' : '7108')
         };
         if (!cleaned.itemName || !['gold', 'silver'].includes(cleaned.metalType)) {
           throw badRequest(`Invalid item at row ${index + 1}`);
         }
-        if (cleaned.grossWeight <= 0 || cleaned.netWeight <= 0 || cleaned.fineWeight < 0) {
-          throw badRequest(`Invalid weights at row ${index + 1}`);
-        }
+        // Allow negative weights for adjustments - toNumber() already ensures values are finite
         return cleaned;
       });
     } else {
