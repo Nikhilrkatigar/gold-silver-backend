@@ -281,6 +281,25 @@ const voucherSchema = new mongoose.Schema({
   cancelledReason: {
     type: String,
     sparse: true
+  },
+  previousLedgerState: {
+    goldFineWeight: { type: Number, default: 0 },
+    silverFineWeight: { type: Number, default: 0 },
+    amount: { type: Number, default: 0 },
+    cashBalance: { type: Number, default: 0 },
+    creditBalance: { type: Number, default: 0 }
+  },
+  stockAdjusted: {
+    type: Boolean,
+    default: false
+  },
+  stockAdjustment: {
+    gold: { type: Number, default: 0 },
+    silver: { type: Number, default: 0 }
+  },
+  stockRestored: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true

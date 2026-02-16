@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const Voucher = require('../models/Voucher');
 const Ledger = require('../models/Ledger');
 const User = require('../models/User');
@@ -39,6 +40,24 @@ const badRequest = (message) => {
   const error = new Error(message);
   error.status = 400;
   return error;
+};
+
+const notFound = (message) => {
+  const error = new Error(message);
+  error.status = 404;
+  return error;
+};
+
+const supportsTransactions = () => {
+  const topologyType = mongoose.connection?.client?.topology?.description?.type;
+  return Boolean(topologyType && topologyType !== 'Single');
+};
+
+const startOptionalSession = async () => {
+  if (!supportsTransactions()) return null;
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  return session;
 };
 
 const calculateUnifiedAmount = (balances) => (
@@ -82,8 +101,45 @@ const getFineByMetal = (items = []) => items.reduce(
   { gold: 0, silver: 0 }
 );
 
-const reverseVoucherEffects = async (voucher, ledger) => {
+const BILLING_TYPES = ['cash', 'credit'];
+const SETTLEMENT_TYPES = ['add_cash', 'add_gold', 'add_silver', 'money_to_gold', 'money_to_silver'];
+const ALLOWED_TYPES = [...BILLING_TYPES, ...SETTLEMENT_TYPES];
+
+const usesStockAdjustment = (paymentType) => BILLING_TYPES.includes(paymentType);
+
+const getVoucherStockAdjustment = (voucher) => {
+  const explicitGold = toNumber(voucher?.stockAdjustment?.gold, null);
+  const explicitSilver = toNumber(voucher?.stockAdjustment?.silver, null);
+
+  if (explicitGold !== null || explicitSilver !== null) {
+    return {
+      gold: explicitGold ?? 0,
+      silver: explicitSilver ?? 0
+    };
+  }
+
+  if (!usesStockAdjustment(voucher?.paymentType)) {
+    return { gold: 0, silver: 0 };
+  }
+
+  return getFineByMetal(voucher?.items || []);
+};
+
+const reverseVoucherEffects = async (voucher, ledger, options = {}) => {
+  const { session, restoreStock = true, markRestored = false } = options;
   if (!voucher || !ledger) return;
+
+  const stockAdjustment = getVoucherStockAdjustment(voucher);
+  const shouldRestoreStock = restoreStock
+    && !voucher.stockRestored
+    && (stockAdjustment.gold > 0 || stockAdjustment.silver > 0);
+
+  if (shouldRestoreStock) {
+    await addBackToStock(voucher.userId, stockAdjustment.gold, stockAdjustment.silver, { session });
+    if (markRestored) {
+      voucher.stockRestored = true;
+    }
+  }
 
   // If voucher has previousLedgerState saved, use it to restore the exact previous state
   if (voucher.previousLedgerState) {
@@ -96,12 +152,6 @@ const reverseVoucherEffects = async (voucher, ledger) => {
   }
 
   // Fallback for vouchers without previousLedgerState (old vouchers)
-  // Reverse stock for all vouchers
-  const fine = getFineByMetal(voucher.items);
-  if (fine.gold > 0 || fine.silver > 0) {
-    await addBackToStock(voucher.userId, fine.gold, fine.silver);
-  }
-
   // Skip balance updates for GST invoices
   if (voucher.invoiceType === 'gst' || ledger.ledgerType === 'gst') {
     return;
@@ -158,13 +208,7 @@ router.use(auth);
 router.use(checkLicense);
 
 router.post('/', async (req, res) => {
-  let voucher;
-  let stockAdjusted = false;
-  let deductedFine = { gold: 0, silver: 0 };
-  let ledger;
-  let previousLedgerState;
-  let previousHasVouchers;
-
+  const session = await startOptionalSession();
   try {
     const {
       ledgerId,
@@ -195,38 +239,27 @@ router.post('/', async (req, res) => {
       balanceSnapshot: incomingBalanceSnapshot
     } = req.body;
 
-    // Allow settlement types
-    const allowedTypes = ['cash', 'credit', 'add_cash', 'add_gold', 'add_silver', 'money_to_gold', 'money_to_silver'];
-    const isSettlementType = ['add_cash', 'add_gold', 'add_silver', 'money_to_gold', 'money_to_silver'].includes(paymentType);
+    const isSettlementType = SETTLEMENT_TYPES.includes(paymentType);
 
     // Validate ledgerId is always required
     if (!ledgerId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Ledger is required'
-      });
+      throw badRequest('Ledger is required');
     }
 
     // Validate paymentType
-    if (!allowedTypes.includes(paymentType)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid paymentType'
-      });
+    if (!ALLOWED_TYPES.includes(paymentType)) {
+      throw badRequest('Invalid paymentType');
     }
 
     // For non-settlement types, items are required
     if (!isSettlementType) {
       if (!Array.isArray(items) || items.length === 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'At least one item is required for this payment type'
-        });
+        throw badRequest('At least one item is required for this payment type');
       }
     }
 
     let cleanedItems = [];
-    if (['cash', 'credit'].includes(paymentType)) {
+    if (BILLING_TYPES.includes(paymentType)) {
       cleanedItems = items.map((item, index) => {
         const cleaned = {
           itemName: String(item.itemName || '').trim(),
@@ -253,23 +286,17 @@ router.post('/', async (req, res) => {
       cleanedItems = [];
     }
 
-    ledger = await Ledger.findOne({
+    const ledger = await Ledger.findOne({
       _id: ledgerId,
       userId: req.userId
-    });
+    }).session(session);
     if (!ledger) {
-      return res.status(404).json({
-        success: false,
-        message: 'Ledger not found'
-      });
+      throw notFound('Ledger not found');
     }
 
-    const user = await User.findById(req.userId);
+    const user = await User.findById(req.userId).session(session);
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
+      throw notFound('User not found');
     }
 
     const normalizedInvoiceNumber = invoiceNumber ? String(invoiceNumber).trim() : '';
@@ -278,12 +305,9 @@ router.post('/', async (req, res) => {
         userId: req.userId,
         invoiceNumber: normalizedInvoiceNumber,
         status: 'active'
-      });
+      }).session(session);
       if (existingInvoice) {
-        return res.status(400).json({
-          success: false,
-          message: CONSTANTS.ERROR_MESSAGES.DUPLICATE_INVOICE
-        });
+        throw badRequest(CONSTANTS.ERROR_MESSAGES.DUPLICATE_INVOICE);
       }
     }
 
@@ -297,12 +321,9 @@ router.post('/', async (req, res) => {
       userId: req.userId,
       voucherNumber: finalVoucherNumber,
       status: 'active'
-    });
+    }).session(session);
     if (duplicateVoucher) {
-      return res.status(400).json({
-        success: false,
-        message: 'Voucher number already exists'
-      });
+      throw badRequest('Voucher number already exists');
     }
 
     let totals = {
@@ -316,7 +337,7 @@ router.post('/', async (req, res) => {
       labourRate: 0,
       amount: 0
     };
-    if (['cash', 'credit'].includes(paymentType)) {
+    if (BILLING_TYPES.includes(paymentType)) {
       totals = cleanedItems.reduce((acc, item) => ({
         pieces: acc.pieces + toNumber(item.pieces),
         grossWeight: acc.grossWeight + toNumber(item.grossWeight),
@@ -355,7 +376,7 @@ router.post('/', async (req, res) => {
 
     let totalBeforeGST = totals.amount + stone + fineAdj;
     let total = totalBeforeGST + toNumber(gstCalc.totalGST);
-    if (['add_cash', 'add_gold', 'add_silver', 'money_to_gold', 'money_to_silver'].includes(paymentType)) {
+    if (SETTLEMENT_TYPES.includes(paymentType)) {
       total = toNumber(cashReceived);
     }
 
@@ -380,14 +401,15 @@ router.post('/', async (req, res) => {
       currentBalance.amount = oldBalance.amount - total; // Subtract cash, add fine below
     }
 
-    if (['cash', 'credit'].includes(paymentType)) {
+    let deductedFine = { gold: 0, silver: 0 };
+    if (usesStockAdjustment(paymentType)) {
       deductedFine = getFineByMetal(cleanedItems);
       if (deductedFine.gold > 0 || deductedFine.silver > 0) {
-        await deductFromStock(req.userId, deductedFine.gold, deductedFine.silver);
-        stockAdjusted = true;
+        await deductFromStock(req.userId, deductedFine.gold, deductedFine.silver, { session });
       }
     }
 
+    const stockAdjusted = deductedFine.gold > 0 || deductedFine.silver > 0;
     const oldCreditAmount = toNumber(ledger.balances.creditBalance);
     const oldCashAmount = toNumber(ledger.balances.cashBalance);
     const oldGoldFineWeight = toNumber(ledger.balances.goldFineWeight);
@@ -432,7 +454,15 @@ router.post('/', async (req, res) => {
 
     const balanceSnapshot = sanitizeBalanceSnapshot(incomingBalanceSnapshot, fallbackBalanceSnapshot);
 
-    voucher = new Voucher({
+    const previousLedgerState = {
+      goldFineWeight: toNumber(ledger.balances.goldFineWeight),
+      silverFineWeight: toNumber(ledger.balances.silverFineWeight),
+      amount: toNumber(ledger.balances.amount),
+      cashBalance: toNumber(ledger.balances.cashBalance),
+      creditBalance: toNumber(ledger.balances.creditBalance)
+    };
+
+    const voucher = new Voucher({
       voucherNumber: finalVoucherNumber,
       userId: req.userId,
       ledgerId,
@@ -479,77 +509,61 @@ router.post('/', async (req, res) => {
       } : undefined,
       creditDueDate: paymentType === 'credit'
         ? new Date(Date.now() + CONSTANTS.CREDIT_PAYMENT.DUE_DAYS * 24 * 60 * 60 * 1000)
-        : null
+        : null,
+      previousLedgerState,
+      stockAdjusted,
+      stockAdjustment: deductedFine,
+      stockRestored: false
     });
 
-    await voucher.save();
-
-    // Re-fetch ledger to get the latest state before updating balance
-    // This prevents race conditions when multiple vouchers are created simultaneously
-    const freshLedger = await Ledger.findById(ledger._id);
-    if (!freshLedger) {
-      throw new Error('Ledger not found after voucher creation');
-    }
-
-    previousLedgerState = {
-      goldFineWeight: toNumber(freshLedger.balances.goldFineWeight),
-      silverFineWeight: toNumber(freshLedger.balances.silverFineWeight),
-      amount: toNumber(freshLedger.balances.amount),
-      cashBalance: toNumber(freshLedger.balances.cashBalance),
-      creditBalance: toNumber(freshLedger.balances.creditBalance)
-    };
-
-    // IMPORTANT: Save previousLedgerState to voucher for proper reversal on delete
-    voucher.previousLedgerState = previousLedgerState;
-
-    previousHasVouchers = freshLedger.hasVouchers;
-
     // Skip balance updates for GST invoices or GST-type ledgers
-    if (invoiceType !== 'gst' && freshLedger.ledgerType !== 'gst') {
+    if (invoiceType !== 'gst' && ledger.ledgerType !== 'gst') {
       if (paymentType === 'credit') {
         cleanedItems.forEach((item) => {
           if (item.metalType === 'gold') {
-            freshLedger.balances.goldFineWeight += toNumber(item.fineWeight);
+            ledger.balances.goldFineWeight += toNumber(item.fineWeight);
           } else if (item.metalType === 'silver') {
-            freshLedger.balances.silverFineWeight += toNumber(item.fineWeight);
+            ledger.balances.silverFineWeight += toNumber(item.fineWeight);
           }
         });
         // Credit bills should update cashBalance, not creditBalance
-        freshLedger.balances.cashBalance = currentBalance.amount;
+        ledger.balances.cashBalance = currentBalance.amount;
       } else if (paymentType === 'cash') {
-        freshLedger.balances.cashBalance = currentBalance.amount;
+        ledger.balances.cashBalance = currentBalance.amount;
       } else if (paymentType === 'add_cash') {
         // For add_cash, determine which balance to update based on which one is being used
-        if (toNumber(freshLedger.balances.cashBalance) !== 0 || toNumber(freshLedger.balances.creditBalance) === 0) {
-          freshLedger.balances.cashBalance = currentBalance.amount;
+        if (toNumber(ledger.balances.cashBalance) !== 0 || toNumber(ledger.balances.creditBalance) === 0) {
+          ledger.balances.cashBalance = currentBalance.amount;
         } else {
-          freshLedger.balances.creditBalance = currentBalance.amount;
+          ledger.balances.creditBalance = currentBalance.amount;
         }
       } else if (paymentType === 'add_gold') {
         // Customer gives gold to settle debt - reduces gold owed
-        freshLedger.balances.goldFineWeight -= toNumber(cashReceived);
+        ledger.balances.goldFineWeight -= toNumber(cashReceived);
       } else if (paymentType === 'add_silver') {
         // Customer gives silver to settle debt - reduces silver owed
-        freshLedger.balances.silverFineWeight -= toNumber(cashReceived);
+        ledger.balances.silverFineWeight -= toNumber(cashReceived);
       } else if (paymentType === 'money_to_gold') {
         // Customer pays cash to settle gold fine debt - reduces gold owed
-        freshLedger.balances.goldFineWeight -= (toNumber(cashReceived) / (toNumber(goldRate) || 1));
+        ledger.balances.goldFineWeight -= (toNumber(cashReceived) / (toNumber(goldRate) || 1));
       } else if (paymentType === 'money_to_silver') {
         // Customer pays cash to settle silver fine debt - reduces silver owed
-        freshLedger.balances.silverFineWeight -= (toNumber(cashReceived) / (toNumber(silverRate) || 1));
+        ledger.balances.silverFineWeight -= (toNumber(cashReceived) / (toNumber(silverRate) || 1));
       }
-      freshLedger.balances.amount = calculateUnifiedAmount(freshLedger.balances);
+      ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
     }
 
-    freshLedger.hasVouchers = true;
-    await freshLedger.save();
-
-    // Save the voucher with previousLedgerState for proper deletion reversal
-    await voucher.save();
+    ledger.hasVouchers = true;
+    await ledger.save({ session });
+    await voucher.save({ session });
 
     if (shouldAutoIncrement) {
       user.voucherSettings.currentVoucherNumber = toNumber(user.voucherSettings.currentVoucherNumber, 1) + 1;
-      await user.save();
+      await user.save({ session });
+    }
+
+    if (session?.inTransaction()) {
+      await session.commitTransaction();
     }
 
     return res.status(201).json({
@@ -558,25 +572,18 @@ router.post('/', async (req, res) => {
       voucher
     });
   } catch (error) {
-    if (voucher?._id) {
-      await Voucher.findByIdAndDelete(voucher._id).catch(() => { });
+    if (session?.inTransaction()) {
+      await session.abortTransaction();
     }
-
-    if (ledger && previousLedgerState) {
-      ledger.balances = previousLedgerState;
-      ledger.hasVouchers = previousHasVouchers;
-      await ledger.save().catch(() => { });
-    }
-
-    if (stockAdjusted && (deductedFine.gold > 0 || deductedFine.silver > 0)) {
-      await addBackToStock(req.userId, deductedFine.gold, deductedFine.silver).catch(() => { });
-    }
-
     console.error('Create voucher error:', error);
     return res.status(error.status || 500).json({
       success: false,
       message: error.message || 'Server error creating voucher'
     });
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 });
 
@@ -690,20 +697,415 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+router.put('/:id', async (req, res) => {
+  const session = await startOptionalSession();
+  try {
+    const existingVoucher = await Voucher.findOne({
+      _id: req.params.id,
+      userId: req.userId
+    }).session(session);
+
+    if (!existingVoucher) {
+      return res.status(404).json({
+        success: false,
+        message: 'Voucher not found'
+      });
+    }
+
+    if (existingVoucher.status === 'cancelled') {
+      throw badRequest('Cancelled vouchers cannot be edited');
+    }
+
+    const previousLedger = await Ledger.findOne({
+      _id: existingVoucher.ledgerId,
+      userId: req.userId
+    }).session(session);
+
+    if (!previousLedger) {
+      throw notFound('Existing voucher ledger not found');
+    }
+
+    // Undo old voucher effects first so update is applied on a clean base state.
+    await reverseVoucherEffects(existingVoucher, previousLedger, {
+      session,
+      restoreStock: true,
+      markRestored: false
+    });
+    await previousLedger.save({ session });
+
+    const {
+      ledgerId,
+      date,
+      paymentType,
+      invoiceType = 'normal',
+      invoiceNumber,
+      referenceNo,
+      eWayBillNo,
+      goldRate,
+      silverRate,
+      items,
+      stoneAmount,
+      fineAmount,
+      issue,
+      receipt,
+      narration,
+      voucherNumber,
+      cashReceived,
+      bankName,
+      accountNumber,
+      ifscCode,
+      upiId,
+      transport,
+      transportId,
+      deliveryLocation,
+      gstDetails,
+      balanceSnapshot: incomingBalanceSnapshot
+    } = req.body;
+
+    const isSettlementType = SETTLEMENT_TYPES.includes(paymentType);
+    if (!ledgerId) {
+      throw badRequest('Ledger is required');
+    }
+    if (!ALLOWED_TYPES.includes(paymentType)) {
+      throw badRequest('Invalid paymentType');
+    }
+    if (!isSettlementType && (!Array.isArray(items) || items.length === 0)) {
+      throw badRequest('At least one item is required for this payment type');
+    }
+
+    let cleanedItems = [];
+    if (BILLING_TYPES.includes(paymentType)) {
+      cleanedItems = items.map((item, index) => {
+        const cleaned = {
+          itemName: String(item.itemName || '').trim(),
+          metalType: item.metalType,
+          pieces: Math.max(1, Math.floor(toNumber(item.pieces, 1))),
+          grossWeight: toNumber(item.grossWeight),
+          lessWeight: Math.max(0, toNumber(item.lessWeight)),
+          netWeight: toNumber(item.netWeight),
+          melting: Math.max(0, toNumber(item.melting)),
+          wastage: Math.max(0, toNumber(item.wastage)),
+          fineWeight: toNumber(item.fineWeight),
+          labourRate: toNumber(item.labourRate),
+          amount: toNumber(item.amount),
+          hsnCode: item.hsnCode || (item.metalType === 'silver' ? '7106' : '7108')
+        };
+        if (!cleaned.itemName || !['gold', 'silver'].includes(cleaned.metalType)) {
+          throw badRequest(`Invalid item at row ${index + 1}`);
+        }
+        return cleaned;
+      });
+    }
+
+    const targetLedger = String(previousLedger._id) === String(ledgerId)
+      ? previousLedger
+      : await Ledger.findOne({
+        _id: ledgerId,
+        userId: req.userId
+      }).session(session);
+    if (!targetLedger) {
+      throw notFound('Ledger not found');
+    }
+
+    const normalizedInvoiceNumber = invoiceNumber ? String(invoiceNumber).trim() : '';
+    if (normalizedInvoiceNumber) {
+      const existingInvoice = await Voucher.findOne({
+        userId: req.userId,
+        invoiceNumber: normalizedInvoiceNumber,
+        status: 'active',
+        _id: { $ne: existingVoucher._id }
+      }).session(session);
+      if (existingInvoice) {
+        throw badRequest(CONSTANTS.ERROR_MESSAGES.DUPLICATE_INVOICE);
+      }
+    }
+
+    const finalVoucherNumber = String(voucherNumber || existingVoucher.voucherNumber || '').trim();
+    if (!finalVoucherNumber) {
+      throw badRequest('Voucher number is required');
+    }
+
+    const duplicateVoucher = await Voucher.findOne({
+      userId: req.userId,
+      voucherNumber: finalVoucherNumber,
+      status: 'active',
+      _id: { $ne: existingVoucher._id }
+    }).session(session);
+    if (duplicateVoucher) {
+      throw badRequest('Voucher number already exists');
+    }
+
+    let totals = {
+      pieces: 0,
+      grossWeight: 0,
+      lessWeight: 0,
+      netWeight: 0,
+      melting: 0,
+      wastage: 0,
+      fineWeight: 0,
+      labourRate: 0,
+      amount: 0
+    };
+    if (BILLING_TYPES.includes(paymentType)) {
+      totals = cleanedItems.reduce((acc, item) => ({
+        pieces: acc.pieces + toNumber(item.pieces),
+        grossWeight: acc.grossWeight + toNumber(item.grossWeight),
+        lessWeight: acc.lessWeight + toNumber(item.lessWeight),
+        netWeight: acc.netWeight + toNumber(item.netWeight),
+        melting: acc.melting + toNumber(item.melting),
+        wastage: acc.wastage + toNumber(item.wastage),
+        fineWeight: acc.fineWeight + toNumber(item.fineWeight),
+        labourRate: acc.labourRate + toNumber(item.labourRate),
+        amount: acc.amount + toNumber(item.amount)
+      }), totals);
+    }
+
+    const oldBalance = {
+      amount: paymentType === 'cash' ? toNumber(targetLedger.balances.cashBalance)
+        : paymentType === 'credit' ? toNumber(targetLedger.balances.cashBalance)
+          : paymentType === 'add_cash' ? (toNumber(targetLedger.balances.cashBalance) || toNumber(targetLedger.balances.creditBalance))
+            : paymentType === 'money_to_gold' || paymentType === 'money_to_silver' ? (toNumber(targetLedger.balances.cashBalance) || toNumber(targetLedger.balances.creditBalance))
+              : toNumber(targetLedger.balances.cashBalance),
+      fineWeight: toNumber(targetLedger.balances.goldFineWeight) + toNumber(targetLedger.balances.silverFineWeight)
+    };
+
+    const stone = toNumber(stoneAmount);
+    const fineAdj = toNumber(fineAmount);
+    const taxableValue = totals.amount + stone;
+
+    let gstType = gstDetails?.gstType;
+    const gstRate = toNumber(gstDetails?.gstRate);
+    if (invoiceType === 'gst' && !['IGST', 'CGST_SGST'].includes(gstType)) {
+      gstType = null;
+    }
+    if (invoiceType === 'gst' && !gstType) {
+      throw badRequest('Invalid GST type for GST invoice');
+    }
+    const gstCalc = calculateGSTBreakdown(taxableValue, gstRate, gstType);
+
+    let totalBeforeGST = totals.amount + stone + fineAdj;
+    let total = totalBeforeGST + toNumber(gstCalc.totalGST);
+    if (SETTLEMENT_TYPES.includes(paymentType)) {
+      total = toNumber(cashReceived);
+    }
+
+    let currentBalance = {
+      amount: 0,
+      netWeight: totals.netWeight
+    };
+    if (paymentType === 'credit') {
+      currentBalance.amount = oldBalance.amount + total;
+    } else if (paymentType === 'cash') {
+      const shortfall = getCashShortfall(total, cashReceived);
+      currentBalance.amount = oldBalance.amount + shortfall;
+    } else if (paymentType === 'add_cash') {
+      currentBalance.amount = oldBalance.amount - total;
+    } else if (paymentType === 'add_gold') {
+      currentBalance.amount = oldBalance.amount;
+    } else if (paymentType === 'add_silver') {
+      currentBalance.amount = oldBalance.amount;
+    } else if (paymentType === 'money_to_gold' || paymentType === 'money_to_silver') {
+      currentBalance.amount = oldBalance.amount - total;
+    }
+
+    let deductedFine = { gold: 0, silver: 0 };
+    if (usesStockAdjustment(paymentType)) {
+      deductedFine = getFineByMetal(cleanedItems);
+      if (deductedFine.gold > 0 || deductedFine.silver > 0) {
+        await deductFromStock(req.userId, deductedFine.gold, deductedFine.silver, { session });
+      }
+    }
+
+    const stockAdjusted = deductedFine.gold > 0 || deductedFine.silver > 0;
+    const oldCreditAmount = toNumber(targetLedger.balances.creditBalance);
+    const oldCashAmount = toNumber(targetLedger.balances.cashBalance);
+    const oldGoldFineWeight = toNumber(targetLedger.balances.goldFineWeight);
+    const oldSilverFineWeight = toNumber(targetLedger.balances.silverFineWeight);
+
+    let currentGoldFineWeight = oldGoldFineWeight;
+    let currentSilverFineWeight = oldSilverFineWeight;
+
+    if (paymentType === 'credit') {
+      currentGoldFineWeight += deductedFine.gold;
+      currentSilverFineWeight += deductedFine.silver;
+    } else if (paymentType === 'add_gold') {
+      currentGoldFineWeight -= toNumber(cashReceived);
+    } else if (paymentType === 'add_silver') {
+      currentSilverFineWeight -= toNumber(cashReceived);
+    } else if (paymentType === 'money_to_gold') {
+      currentGoldFineWeight -= (toNumber(cashReceived) / (toNumber(goldRate) || 1));
+    } else if (paymentType === 'money_to_silver') {
+      currentSilverFineWeight -= (toNumber(cashReceived) / (toNumber(silverRate) || 1));
+    }
+
+    const fallbackCurrentAmount = paymentType === 'credit'
+      ? (oldCreditAmount + oldCashAmount + total)
+      : paymentType === 'cash'
+        ? (oldCashAmount + getCashShortfall(total, cashReceived))
+        : currentBalance.amount;
+
+    const fallbackBalanceSnapshot = {
+      oldBalance: {
+        creditAmount: oldCreditAmount,
+        cashAmount: oldCashAmount,
+        totalAmount: oldCreditAmount + oldCashAmount,
+        goldFineWeight: oldGoldFineWeight,
+        silverFineWeight: oldSilverFineWeight
+      },
+      currentBalance: {
+        amount: fallbackCurrentAmount,
+        goldFineWeight: currentGoldFineWeight,
+        silverFineWeight: currentSilverFineWeight
+      }
+    };
+
+    const balanceSnapshot = sanitizeBalanceSnapshot(incomingBalanceSnapshot, fallbackBalanceSnapshot);
+
+    const previousLedgerState = {
+      goldFineWeight: toNumber(targetLedger.balances.goldFineWeight),
+      silverFineWeight: toNumber(targetLedger.balances.silverFineWeight),
+      amount: toNumber(targetLedger.balances.amount),
+      cashBalance: toNumber(targetLedger.balances.cashBalance),
+      creditBalance: toNumber(targetLedger.balances.creditBalance)
+    };
+
+    if (invoiceType !== 'gst' && targetLedger.ledgerType !== 'gst') {
+      if (paymentType === 'credit') {
+        cleanedItems.forEach((item) => {
+          if (item.metalType === 'gold') {
+            targetLedger.balances.goldFineWeight += toNumber(item.fineWeight);
+          } else if (item.metalType === 'silver') {
+            targetLedger.balances.silverFineWeight += toNumber(item.fineWeight);
+          }
+        });
+        targetLedger.balances.cashBalance = currentBalance.amount;
+      } else if (paymentType === 'cash') {
+        targetLedger.balances.cashBalance = currentBalance.amount;
+      } else if (paymentType === 'add_cash') {
+        if (toNumber(targetLedger.balances.cashBalance) !== 0 || toNumber(targetLedger.balances.creditBalance) === 0) {
+          targetLedger.balances.cashBalance = currentBalance.amount;
+        } else {
+          targetLedger.balances.creditBalance = currentBalance.amount;
+        }
+      } else if (paymentType === 'add_gold') {
+        targetLedger.balances.goldFineWeight -= toNumber(cashReceived);
+      } else if (paymentType === 'add_silver') {
+        targetLedger.balances.silverFineWeight -= toNumber(cashReceived);
+      } else if (paymentType === 'money_to_gold') {
+        targetLedger.balances.goldFineWeight -= (toNumber(cashReceived) / (toNumber(goldRate) || 1));
+      } else if (paymentType === 'money_to_silver') {
+        targetLedger.balances.silverFineWeight -= (toNumber(cashReceived) / (toNumber(silverRate) || 1));
+      }
+      targetLedger.balances.amount = calculateUnifiedAmount(targetLedger.balances);
+    }
+
+    targetLedger.hasVouchers = true;
+
+    if (String(previousLedger._id) !== String(targetLedger._id)) {
+      const remainingOnPrevious = await Voucher.countDocuments({
+        ledgerId: previousLedger._id,
+        _id: { $ne: existingVoucher._id },
+        status: 'active'
+      }).session(session);
+      previousLedger.hasVouchers = remainingOnPrevious > 0;
+      await previousLedger.save({ session });
+    }
+
+    existingVoucher.set({
+      voucherNumber: finalVoucherNumber,
+      userId: req.userId,
+      ledgerId,
+      customerName: targetLedger.name,
+      date: date || new Date(),
+      invoiceType,
+      invoiceNumber: normalizedInvoiceNumber || '',
+      referenceNo: referenceNo || '',
+      paymentType,
+      goldRate: toNumber(goldRate),
+      silverRate: toNumber(silverRate),
+      items: cleanedItems,
+      totals,
+      stoneAmount: stone,
+      fineAmount: fineAdj,
+      issue: issue || { gross: 0 },
+      receipt: receipt || { gross: 0 },
+      oldBalance,
+      currentBalance,
+      balanceSnapshot,
+      total,
+      cashReceived: toNumber(cashReceived),
+      narration: narration || '',
+      eWayBillNo: eWayBillNo || '',
+      bankName: bankName || '',
+      accountNumber: accountNumber || '',
+      ifscCode: ifscCode || '',
+      upiId: upiId || '',
+      transport: transport || '',
+      transportId: transportId || '',
+      deliveryLocation: deliveryLocation || '',
+      gstDetails: invoiceType === 'gst' ? {
+        sellerGSTNumber: gstDetails?.sellerGSTNumber,
+        sellerState: gstDetails?.sellerState,
+        customerGSTNumber: gstDetails?.customerGSTNumber,
+        customerState: gstDetails?.customerState,
+        gstType,
+        gstRate,
+        taxableValue,
+        igst: gstCalc.igst,
+        cgst: gstCalc.cgst,
+        sgst: gstCalc.sgst,
+        totalGST: gstCalc.totalGST
+      } : undefined,
+      creditDueDate: paymentType === 'credit'
+        ? new Date(Date.now() + CONSTANTS.CREDIT_PAYMENT.DUE_DAYS * 24 * 60 * 60 * 1000)
+        : null,
+      previousLedgerState,
+      stockAdjusted,
+      stockAdjustment: deductedFine,
+      stockRestored: false,
+      status: 'active',
+      cancelledReason: undefined
+    });
+
+    await targetLedger.save({ session });
+    await existingVoucher.save({ session });
+    if (session?.inTransaction()) {
+      await session.commitTransaction();
+    }
+
+    return res.json({
+      success: true,
+      message: 'Voucher updated successfully',
+      voucher: existingVoucher
+    });
+  } catch (error) {
+    if (session?.inTransaction()) {
+      await session.abortTransaction();
+    }
+    console.error('Update voucher error:', error);
+    return res.status(error.status || 500).json({
+      success: false,
+      message: error.message || 'Server error updating voucher'
+    });
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
+  }
+});
+
 router.patch('/:id', async (req, res) => {
+  const session = await startOptionalSession();
   try {
     const { status, cancelledReason } = req.body;
     if (status !== 'cancelled') {
-      return res.status(400).json({
-        success: false,
-        message: 'Only cancellation is supported via PATCH'
-      });
+      throw badRequest('Only cancellation is supported via PATCH');
     }
 
     const voucher = await Voucher.findOne({
       _id: req.params.id,
       userId: req.userId
-    });
+    }).session(session);
     if (!voucher) {
       return res.status(404).json({
         success: false,
@@ -718,15 +1120,29 @@ router.patch('/:id', async (req, res) => {
       });
     }
 
-    const ledger = await Ledger.findById(voucher.ledgerId);
+    const ledger = await Ledger.findById(voucher.ledgerId).session(session);
     if (ledger) {
-      await reverseVoucherEffects(voucher, ledger);
-      await ledger.save();
+      await reverseVoucherEffects(voucher, ledger, { session, restoreStock: true, markRestored: true });
+
+      const remainingVouchers = await Voucher.countDocuments({
+        ledgerId: voucher.ledgerId,
+        _id: { $ne: voucher._id },
+        status: 'active'
+      }).session(session);
+
+      if (remainingVouchers === 0) {
+        ledger.hasVouchers = false;
+      }
+      await ledger.save({ session });
     }
 
     voucher.status = 'cancelled';
     voucher.cancelledReason = cancelledReason || 'Cancelled by user';
-    await voucher.save();
+    await voucher.save({ session });
+
+    if (session?.inTransaction()) {
+      await session.commitTransaction();
+    }
 
     return res.json({
       success: true,
@@ -734,20 +1150,28 @@ router.patch('/:id', async (req, res) => {
       voucher
     });
   } catch (error) {
+    if (session?.inTransaction()) {
+      await session.abortTransaction();
+    }
     console.error('Cancel voucher error:', error);
     return res.status(error.status || 500).json({
       success: false,
       message: error.message || 'Server error cancelling voucher'
     });
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 });
 
 router.delete('/:id', async (req, res) => {
+  const session = await startOptionalSession();
   try {
     const voucher = await Voucher.findOne({
       _id: req.params.id,
       userId: req.userId
-    });
+    }).session(session);
 
     if (!voucher) {
       return res.status(404).json({
@@ -756,36 +1180,52 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
-    const ledger = await Ledger.findById(voucher.ledgerId);
+    const ledger = await Ledger.findById(voucher.ledgerId).session(session);
     if (ledger) {
       if (voucher.status !== 'cancelled') {
-        await reverseVoucherEffects(voucher, ledger);
+        await reverseVoucherEffects(voucher, ledger, { session, restoreStock: true, markRestored: false });
+      } else if (!voucher.stockRestored) {
+        const adjustment = getVoucherStockAdjustment(voucher);
+        if (adjustment.gold > 0 || adjustment.silver > 0) {
+          await addBackToStock(voucher.userId, adjustment.gold, adjustment.silver, { session });
+        }
       }
 
       const remainingVouchers = await Voucher.countDocuments({
         ledgerId: voucher.ledgerId,
         _id: { $ne: voucher._id },
         status: 'active'
-      });
+      }).session(session);
 
       if (remainingVouchers === 0) {
         ledger.hasVouchers = false;
       }
-      await ledger.save();
+      await ledger.save({ session });
     }
 
-    await Voucher.findByIdAndDelete(req.params.id);
+    await Voucher.findByIdAndDelete(req.params.id).session(session);
+
+    if (session?.inTransaction()) {
+      await session.commitTransaction();
+    }
 
     return res.json({
       success: true,
       message: 'Voucher deleted successfully'
     });
   } catch (error) {
+    if (session?.inTransaction()) {
+      await session.abortTransaction();
+    }
     console.error('Delete voucher error:', error);
     return res.status(error.status || 500).json({
       success: false,
       message: error.message || 'Server error deleting voucher'
     });
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 });
 

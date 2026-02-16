@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const { Stock, StockInput } = require('../models/Stock');
 const Voucher = require('../models/Voucher'); // Import Voucher model
 const { auth, checkLicense } = require('../middleware/auth');
@@ -12,6 +13,18 @@ const createError = (status, message, code) => {
   return error;
 };
 
+const supportsTransactions = () => {
+  const topologyType = mongoose.connection?.client?.topology?.description?.type;
+  return Boolean(topologyType && topologyType !== 'Single');
+};
+
+const startOptionalSession = async () => {
+  if (!supportsTransactions()) return null;
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  return session;
+};
+
 const toNumber = (value, fieldName) => {
   const number = Number(value ?? 0);
   if (!Number.isFinite(number)) {
@@ -20,10 +33,27 @@ const toNumber = (value, fieldName) => {
   return number;
 };
 
-const ensureUserStock = async (userId) => {
-  let stock = await Stock.findOne({ userId });
+const ensureUserStock = async (userId, options = {}) => {
+  const { session } = options;
+  let stockQuery = Stock.findOne({ userId });
+  if (session) {
+    stockQuery = stockQuery.session(session);
+  }
+  let stock = await stockQuery;
   if (!stock) {
-    stock = await Stock.create({ userId, gold: 0, silver: 0, cashInHand: 0 }); // Initialize cashInHand
+    try {
+      const created = await Stock.create([{ userId, gold: 0, silver: 0, cashInHand: 0 }], session ? { session } : {});
+      stock = created[0];
+    } catch (error) {
+      if (error?.code !== 11000) {
+        throw error;
+      }
+      let retryQuery = Stock.findOne({ userId });
+      if (session) {
+        retryQuery = retryQuery.session(session);
+      }
+      stock = await retryQuery;
+    }
   }
   return stock;
 };
@@ -68,16 +98,22 @@ router.get('/', async (req, res) => {
 
 // Add stock for user
 router.post('/add', async (req, res) => {
+  const session = await startOptionalSession();
   try {
     const gold = toNumber(req.body.gold, 'gold');
     const silver = toNumber(req.body.silver, 'silver');
-    const cashAmount = toNumber(req.body.cashAmount, 'cash amount'); // Get cash amount
+    const cashAmount = toNumber(req.body.cashAmount ?? req.body.amount, 'cash amount');
+    const inputDate = req.body.dateTime ? new Date(req.body.dateTime) : new Date();
 
     if (gold < 0 || silver < 0 || cashAmount < 0) {
       throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, 'Stock/Cash amounts cannot be negative', 'INVALID_STOCK');
     }
 
-    const stock = await ensureUserStock(req.userId);
+    if (Number.isNaN(inputDate.getTime())) {
+      throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, 'Invalid date/time', 'INVALID_DATE');
+    }
+
+    const stock = await ensureUserStock(req.userId, { session });
     stock.gold += gold;
     stock.silver += silver;
 
@@ -85,21 +121,33 @@ router.post('/add', async (req, res) => {
     stock.cashInHand = (stock.cashInHand || 0) - cashAmount;
 
     stock.updatedAt = new Date();
-    await stock.save();
+    await stock.save({ session });
 
-    await StockInput.create({
+    await StockInput.create([{
       userId: req.userId,
       gold,
       silver,
-      cashAmount // Save cash amount in history
-    });
+      cashAmount,
+      date: inputDate
+    }], session ? { session } : {});
+
+    if (session?.inTransaction()) {
+      await session.commitTransaction();
+    }
 
     res.json({ success: true, stock });
   } catch (error) {
+    if (session?.inTransaction()) {
+      await session.abortTransaction();
+    }
     res.status(error.status || CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
       success: false,
       message: error.message || 'Error adding stock'
     });
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 });
 
@@ -140,13 +188,14 @@ router.get('/history', async (req, res) => {
 
 // Undo last stock input for user
 router.post('/undo', async (req, res) => {
+  const session = await startOptionalSession();
   try {
-    const lastInput = await StockInput.findOne({ userId: req.userId }).sort({ date: -1 });
+    const lastInput = await StockInput.findOne({ userId: req.userId }).sort({ date: -1 }).session(session);
     if (!lastInput) {
       throw createError(CONSTANTS.HTTP_STATUS.NOT_FOUND, 'No stock input to undo.', 'NO_STOCK_INPUT');
     }
 
-    const stock = await ensureUserStock(req.userId);
+    const stock = await ensureUserStock(req.userId, { session });
     const updatedGold = stock.gold - Number(lastInput.gold || 0);
     const updatedSilver = stock.silver - Number(lastInput.silver || 0);
     const cashAmount = Number(lastInput.cashAmount || 0);
@@ -162,20 +211,32 @@ router.post('/undo', async (req, res) => {
     stock.cashInHand = (stock.cashInHand || 0) + cashAmount;
 
     stock.updatedAt = new Date();
-    await stock.save();
-    await lastInput.deleteOne();
+    await stock.save({ session });
+    await lastInput.deleteOne({ session });
+
+    if (session?.inTransaction()) {
+      await session.commitTransaction();
+    }
 
     res.json({ success: true, stock });
   } catch (error) {
+    if (session?.inTransaction()) {
+      await session.abortTransaction();
+    }
     res.status(error.status || CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
       success: false,
       message: error.message || 'Error undoing last stock input'
     });
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 });
 
 // Utility functions for automatic stock deduction/addition (used by other routes)
-const deductFromStock = async (userId, goldFineWeight = 0, silverFineWeight = 0) => {
+const deductFromStock = async (userId, goldFineWeight = 0, silverFineWeight = 0, options = {}) => {
+  const { session } = options;
   const gold = toNumber(goldFineWeight, 'gold fine weight');
   const silver = toNumber(silverFineWeight, 'silver fine weight');
 
@@ -183,24 +244,34 @@ const deductFromStock = async (userId, goldFineWeight = 0, silverFineWeight = 0)
     throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, 'Stock deduction values cannot be negative', 'INVALID_STOCK');
   }
 
-  const stock = await ensureUserStock(userId);
+  await ensureUserStock(userId, { session });
 
-  if (
-    stock.gold - gold < CONSTANTS.STOCK.MIN_ALLOWED ||
-    stock.silver - silver < CONSTANTS.STOCK.MIN_ALLOWED
-  ) {
+  let updateQuery = Stock.findOneAndUpdate(
+    {
+      userId,
+      gold: { $gte: gold },
+      silver: { $gte: silver }
+    },
+    {
+      $inc: { gold: -gold, silver: -silver },
+      $set: { updatedAt: new Date() }
+    },
+    { new: true }
+  );
+  if (session) {
+    updateQuery = updateQuery.session(session);
+  }
+  const stock = await updateQuery;
+
+  if (!stock) {
     throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, CONSTANTS.ERROR_MESSAGES.INSUFFICIENT_STOCK, 'INSUFFICIENT_STOCK');
   }
-
-  stock.gold -= gold;
-  stock.silver -= silver;
-  stock.updatedAt = new Date();
-  await stock.save();
 
   return stock;
 };
 
-const addBackToStock = async (userId, goldFineWeight = 0, silverFineWeight = 0) => {
+const addBackToStock = async (userId, goldFineWeight = 0, silverFineWeight = 0, options = {}) => {
+  const { session } = options;
   const gold = toNumber(goldFineWeight, 'gold fine weight');
   const silver = toNumber(silverFineWeight, 'silver fine weight');
 
@@ -208,11 +279,20 @@ const addBackToStock = async (userId, goldFineWeight = 0, silverFineWeight = 0) 
     throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, 'Stock add-back values cannot be negative', 'INVALID_STOCK');
   }
 
-  const stock = await ensureUserStock(userId);
-  stock.gold += gold;
-  stock.silver += silver;
-  stock.updatedAt = new Date();
-  await stock.save();
+  await ensureUserStock(userId, { session });
+
+  let updateQuery = Stock.findOneAndUpdate(
+    { userId },
+    {
+      $inc: { gold, silver },
+      $set: { updatedAt: new Date() }
+    },
+    { new: true }
+  );
+  if (session) {
+    updateQuery = updateQuery.session(session);
+  }
+  const stock = await updateQuery;
 
   return stock;
 };
