@@ -25,7 +25,7 @@ router.use(checkLicense);
 
 router.post('/', async (req, res) => {
   try {
-    const { name, gstDetails, ledgerType } = req.body;
+    const { name, gstDetails, ledgerType, openingBalance } = req.body;
     const phoneNumber = sanitizePhone(req.body.phoneNumber);
 
     if (!name) {
@@ -43,6 +43,24 @@ router.post('/', async (req, res) => {
       });
     }
 
+    // Accept both the nested openingBalance payload and legacy oldBal* fields.
+    const incomingOpeningBalance = openingBalance ?? (
+      req.body.oldBalAmount !== undefined ||
+      req.body.oldBalGold !== undefined ||
+      req.body.oldBalSilver !== undefined
+        ? {
+          amount: req.body.oldBalAmount,
+          goldFineWeight: req.body.oldBalGold,
+          silverFineWeight: req.body.oldBalSilver
+        }
+        : undefined
+    );
+
+    // Parse opening balance values
+    const obAmount = toNumber(incomingOpeningBalance?.amount);
+    const obGold = toNumber(incomingOpeningBalance?.goldFineWeight);
+    const obSilver = toNumber(incomingOpeningBalance?.silverFineWeight);
+
     const ledger = new Ledger({
       name: name.trim(),
       phoneNumber: phoneNumber || '',
@@ -54,7 +72,20 @@ router.post('/', async (req, res) => {
           gstNumber: gstDetails.gstNumber || undefined,
           stateCode: gstDetails.stateCode || undefined
         }
-      })
+      }),
+      openingBalance: {
+        amount: obAmount,
+        goldFineWeight: obGold,
+        silverFineWeight: obSilver
+      },
+      // Initialize balances to match opening balance
+      balances: {
+        goldFineWeight: obGold,
+        silverFineWeight: obSilver,
+        amount: obAmount,
+        cashBalance: obAmount,
+        creditBalance: 0
+      }
     });
 
     await ledger.save();
@@ -271,6 +302,27 @@ router.patch('/:id', async (req, res) => {
       };
     }
 
+    // Allow updating opening balance
+    const incomingOpeningBalance = req.body.openingBalance ?? (
+      req.body.oldBalAmount !== undefined ||
+      req.body.oldBalGold !== undefined ||
+      req.body.oldBalSilver !== undefined
+        ? {
+          amount: req.body.oldBalAmount,
+          goldFineWeight: req.body.oldBalGold,
+          silverFineWeight: req.body.oldBalSilver
+        }
+        : undefined
+    );
+
+    if (incomingOpeningBalance !== undefined) {
+      updates.openingBalance = {
+        amount: toNumber(incomingOpeningBalance.amount),
+        goldFineWeight: toNumber(incomingOpeningBalance.goldFineWeight),
+        silverFineWeight: toNumber(incomingOpeningBalance.silverFineWeight)
+      };
+    }
+
     const ledger = await Ledger.findOneAndUpdate(
       { _id: req.params.id, userId: req.userId },
       updates,
@@ -282,6 +334,31 @@ router.patch('/:id', async (req, res) => {
         success: false,
         message: 'Ledger not found'
       });
+    }
+
+    // If opening balance was updated and there are no transactions yet,
+    // keep current balances aligned with the new opening values.
+    if (updates.openingBalance !== undefined) {
+      const [voucherCount, settlementCount] = await Promise.all([
+        Voucher.countDocuments({ userId: req.userId, ledgerId: req.params.id }),
+        Settlement.countDocuments({ userId: req.userId, ledgerId: req.params.id })
+      ]);
+
+      if (voucherCount === 0 && settlementCount === 0) {
+        if (ledger.ledgerType === 'gst') {
+          ledger.balances = resetBalances();
+        } else {
+          ledger.balances = {
+            ...ledger.balances,
+            goldFineWeight: toNumber(updates.openingBalance.goldFineWeight),
+            silverFineWeight: toNumber(updates.openingBalance.silverFineWeight),
+            cashBalance: toNumber(updates.openingBalance.amount),
+            creditBalance: 0,
+            amount: toNumber(updates.openingBalance.amount)
+          };
+        }
+        await ledger.save();
+      }
     }
 
     return res.json({
@@ -429,7 +506,14 @@ router.post('/:id/recalculate-balance', async (req, res) => {
       });
     }
 
-    ledger.balances = resetBalances();
+    // Start from opening balance instead of zero
+    const ob = ledger.openingBalance || {};
+    ledger.balances = {
+      ...resetBalances(),
+      goldFineWeight: toNumber(ob.goldFineWeight),
+      silverFineWeight: toNumber(ob.silverFineWeight),
+      cashBalance: toNumber(ob.amount)
+    };
 
     vouchers.forEach((voucher) => {
       // Skip GST invoices as they don't affect regular balance

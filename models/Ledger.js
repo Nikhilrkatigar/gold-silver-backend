@@ -54,6 +54,20 @@ const ledgerSchema = new mongoose.Schema({
       match: [/^\d{2}$/, 'State code must be 2 digits']
     }
   },
+  openingBalance: {
+    amount: {
+      type: Number,
+      default: 0
+    },
+    goldFineWeight: {
+      type: Number,
+      default: 0
+    },
+    silverFineWeight: {
+      type: Number,
+      default: 0
+    }
+  },
   balances: {
     goldFineWeight: {
       type: Number,

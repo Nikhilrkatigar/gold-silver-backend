@@ -54,6 +54,7 @@ const mapUser = (user) => ({
   voucherSettings: user.voucherSettings,
   gstEnabled: user.gstEnabled,
   gstSettings: user.gstSettings,
+  labourChargeSettings: user.labourChargeSettings,
   daysUntilExpiry: user.getDaysUntilExpiry?.(),
   isLicenseExpired: user.isLicenseExpired?.()
 });
@@ -125,7 +126,7 @@ router.get('/me', auth, async (req, res) => {
 
 router.patch('/settings', auth, async (req, res) => {
   try {
-    const { theme, voucherSettings, gstSettings } = req.body;
+    const { theme, voucherSettings, gstSettings, labourChargeSettings } = req.body;
     const user = await User.findById(req.userId);
 
     if (!user) {
@@ -171,6 +172,19 @@ router.patch('/settings', auth, async (req, res) => {
         ...(user.gstSettings?.toObject?.() || user.gstSettings || {}),
         ...gstSettings,
         gstNumber: gstSettings.gstNumber ? gstSettings.gstNumber.toUpperCase() : user.gstSettings?.gstNumber
+      };
+    }
+
+    if (labourChargeSettings) {
+      if (!['full', 'per-gram'].includes(labourChargeSettings.type)) {
+        return res.status(CONSTANTS.HTTP_STATUS.BAD_REQUEST).json({
+          success: false,
+          message: 'Invalid labour charge type. Must be "full" or "per-gram"'
+        });
+      }
+      user.labourChargeSettings = {
+        ...(user.labourChargeSettings?.toObject?.() || user.labourChargeSettings || {}),
+        ...labourChargeSettings
       };
     }
 

@@ -81,6 +81,13 @@ const userSchema = new mongoose.Schema({
       default: 'user'
     }
   },
+  labourChargeSettings: {
+    type: {
+      type: String,
+      enum: ['full', 'per-gram'],
+      default: 'full'
+    }
+  },
   theme: {
     type: String,
     enum: ['light', 'dark', 'system'],

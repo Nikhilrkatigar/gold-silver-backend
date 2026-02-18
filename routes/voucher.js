@@ -107,6 +107,21 @@ const ALLOWED_TYPES = [...BILLING_TYPES, ...SETTLEMENT_TYPES];
 
 const usesStockAdjustment = (paymentType) => BILLING_TYPES.includes(paymentType);
 
+const getReversalWindowHours = () => {
+  const configured = toNumber(CONSTANTS.REVERSAL_POLICY?.WINDOW_HOURS, 48);
+  return configured > 0 ? configured : 48;
+};
+
+const canReverseForVoucher = (voucher) => {
+  const referenceDate = voucher?.createdAt ? new Date(voucher.createdAt) : null;
+  const referenceTime = referenceDate?.getTime();
+  if (!Number.isFinite(referenceTime)) return false;
+
+  const elapsedMs = Date.now() - referenceTime;
+  const allowedMs = getReversalWindowHours() * 60 * 60 * 1000;
+  return elapsedMs <= allowedMs;
+};
+
 const getVoucherStockAdjustment = (voucher) => {
   const explicitGold = toNumber(voucher?.stockAdjustment?.gold, null);
   const explicitSilver = toNumber(voucher?.stockAdjustment?.silver, null);
@@ -622,44 +637,95 @@ router.get('/', async (req, res) => {
 
 router.get('/due-credits', async (req, res) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const dueDays = toNumber(CONSTANTS.CREDIT_PAYMENT?.DUE_DAYS, 5);
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date(startOfToday);
+    endOfToday.setHours(23, 59, 59, 999);
 
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-
-    const dueVouchers = await Voucher.find({
+    // Build earliest due date per ledger from active credit vouchers.
+    const creditVouchers = await Voucher.find({
       userId: req.userId,
       paymentType: 'credit',
       status: 'active',
-      creditDueDate: {
-        $gte: today,
-        $lt: tomorrow
+      invoiceType: { $ne: 'gst' }
+    }).select('ledgerId date creditDueDate').lean();
+
+    const dueDateByLedger = new Map();
+    for (const voucher of creditVouchers) {
+      if (!voucher?.ledgerId) continue;
+
+      let dueDate = voucher.creditDueDate ? new Date(voucher.creditDueDate) : null;
+      if (!dueDate || Number.isNaN(dueDate.getTime())) {
+        const baseDate = voucher.date ? new Date(voucher.date) : null;
+        if (!baseDate || Number.isNaN(baseDate.getTime())) continue;
+        dueDate = new Date(baseDate);
+        dueDate.setDate(dueDate.getDate() + dueDays);
       }
-    }).populate('ledgerId', 'name phoneNumber');
 
-    const ledgerMap = new Map();
+      const ledgerId = String(voucher.ledgerId);
+      const existing = dueDateByLedger.get(ledgerId);
+      if (!existing || dueDate.getTime() < existing.getTime()) {
+        dueDateByLedger.set(ledgerId, dueDate);
+      }
+    }
 
-    for (const voucher of dueVouchers) {
-      if (!voucher.ledgerId?._id) continue;
-      const ledgerId = voucher.ledgerId._id.toString();
-      if (ledgerMap.has(ledgerId)) continue;
+    // Evaluate all regular ledgers (including older ledgers with missing ledgerType).
+    const ledgers = await Ledger.find({
+      userId: req.userId,
+      ledgerType: { $ne: 'gst' }
+    }).select('name phoneNumber balances openingBalance createdAt').lean();
 
-      const ledger = await Ledger.findById(ledgerId);
-      if (!ledger) continue;
+    const dueCredits = [];
+    for (const ledger of ledgers) {
+      const ledgerId = String(ledger._id);
 
-      ledgerMap.set(ledgerId, {
-        name: voucher.ledgerId.name,
-        phoneNumber: voucher.ledgerId.phoneNumber,
-        balanceAmount: toNumber(ledger.balances.creditBalance),
-        goldFineWeight: toNumber(ledger.balances.goldFineWeight),
-        silverFineWeight: toNumber(ledger.balances.silverFineWeight)
+      // Prefer credit voucher due date. If none, fall back to opening balance age.
+      let dueDate = dueDateByLedger.get(ledgerId);
+      if (!dueDate) {
+        const openingAmount = toNumber(ledger?.openingBalance?.amount);
+        const openingGold = toNumber(ledger?.openingBalance?.goldFineWeight);
+        const openingSilver = toNumber(ledger?.openingBalance?.silverFineWeight);
+        const hasOpeningBalance = openingAmount > 0 || openingGold > 0 || openingSilver > 0;
+        if (!hasOpeningBalance) continue;
+
+        const baseDate = ledger.createdAt ? new Date(ledger.createdAt) : null;
+        if (!baseDate || Number.isNaN(baseDate.getTime())) continue;
+        dueDate = new Date(baseDate);
+        dueDate.setDate(dueDate.getDate() + dueDays);
+      }
+
+      if (dueDate.getTime() > endOfToday.getTime()) continue;
+
+      const cashBalance = toNumber(ledger?.balances?.cashBalance);
+      const creditBalance = toNumber(ledger?.balances?.creditBalance);
+      const balanceAmount = cashBalance + creditBalance;
+      const goldFineWeight = toNumber(ledger?.balances?.goldFineWeight);
+      const silverFineWeight = toNumber(ledger?.balances?.silverFineWeight);
+
+      // Auto-remove from due list once all dues are cleared.
+      if (balanceAmount <= 0 && goldFineWeight <= 0 && silverFineWeight <= 0) continue;
+
+      const dueDateStart = new Date(dueDate);
+      dueDateStart.setHours(0, 0, 0, 0);
+      const daysOverdue = Math.max(0, Math.floor((startOfToday.getTime() - dueDateStart.getTime()) / msPerDay));
+
+      dueCredits.push({
+        ledgerId,
+        name: ledger.name,
+        phoneNumber: ledger.phoneNumber || '',
+        balanceAmount,
+        goldFineWeight,
+        silverFineWeight,
+        dueDate,
+        daysOverdue
       });
     }
 
     return res.json({
       success: true,
-      dueCredits: Array.from(ledgerMap.values()).filter((row) => row.balanceAmount > 0)
+      dueCredits: dueCredits.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
     });
   } catch (error) {
     console.error('Get due credits error:', error);
@@ -714,6 +780,10 @@ router.put('/:id', async (req, res) => {
 
     if (existingVoucher.status === 'cancelled') {
       throw badRequest('Cancelled vouchers cannot be edited');
+    }
+
+    if (!canReverseForVoucher(existingVoucher)) {
+      throw badRequest(`Voucher cannot be edited after ${getReversalWindowHours()} hours`);
     }
 
     const previousLedger = await Ledger.findOne({
@@ -1120,6 +1190,10 @@ router.patch('/:id', async (req, res) => {
       });
     }
 
+    if (!canReverseForVoucher(voucher)) {
+      throw badRequest(`Voucher cannot be cancelled after ${getReversalWindowHours()} hours`);
+    }
+
     const ledger = await Ledger.findById(voucher.ledgerId).session(session);
     if (ledger) {
       await reverseVoucherEffects(voucher, ledger, { session, restoreStock: true, markRestored: true });
@@ -1178,6 +1252,10 @@ router.delete('/:id', async (req, res) => {
         success: false,
         message: 'Voucher not found'
       });
+    }
+
+    if (!canReverseForVoucher(voucher)) {
+      throw badRequest(`Voucher cannot be deleted after ${getReversalWindowHours()} hours`);
     }
 
     const ledger = await Ledger.findById(voucher.ledgerId).session(session);

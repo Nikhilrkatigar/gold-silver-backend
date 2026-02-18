@@ -16,6 +16,12 @@ module.exports = {
     DEFAULT_INTEREST_RATE: 0
   },
 
+  // Reversal Policy
+  // Set REVERSAL_WINDOW_HOURS in environment (e.g., 24 or 48).
+  REVERSAL_POLICY: {
+    WINDOW_HOURS: Number(process.env.REVERSAL_WINDOW_HOURS || 48)
+  },
+
   // Stock Configuration
   STOCK: {
     MIN_ALLOWED: 0,
