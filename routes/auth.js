@@ -55,6 +55,7 @@ const mapUser = (user) => ({
   gstEnabled: user.gstEnabled,
   gstSettings: user.gstSettings,
   labourChargeSettings: user.labourChargeSettings,
+  stockMode: user.stockMode,
   daysUntilExpiry: user.getDaysUntilExpiry?.(),
   isLicenseExpired: user.isLicenseExpired?.()
 });

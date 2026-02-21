@@ -277,6 +277,7 @@ router.post('/', async (req, res) => {
     if (BILLING_TYPES.includes(paymentType)) {
       cleanedItems = items.map((item, index) => {
         const cleaned = {
+          sourceItemId: mongoose.Types.ObjectId.isValid(item.sourceItemId) ? item.sourceItemId : undefined,
           itemName: String(item.itemName || '').trim(),
           metalType: item.metalType,
           pieces: Math.max(1, Math.floor(toNumber(item.pieces, 1))),
@@ -417,7 +418,9 @@ router.post('/', async (req, res) => {
     }
 
     let deductedFine = { gold: 0, silver: 0 };
-    if (usesStockAdjustment(paymentType)) {
+    // Only deduct from bulk stock if user is NOT in item mode
+    // Item mode tracks items individually, not bulk stock
+    if (user.stockMode !== 'item' && usesStockAdjustment(paymentType)) {
       deductedFine = getFineByMetal(cleanedItems);
       if (deductedFine.gold > 0 || deductedFine.silver > 0) {
         await deductFromStock(req.userId, deductedFine.gold, deductedFine.silver, { session });
@@ -847,6 +850,7 @@ router.put('/:id', async (req, res) => {
     if (BILLING_TYPES.includes(paymentType)) {
       cleanedItems = items.map((item, index) => {
         const cleaned = {
+          sourceItemId: mongoose.Types.ObjectId.isValid(item.sourceItemId) ? item.sourceItemId : undefined,
           itemName: String(item.itemName || '').trim(),
           metalType: item.metalType,
           pieces: Math.max(1, Math.floor(toNumber(item.pieces, 1))),
@@ -978,8 +982,16 @@ router.put('/:id', async (req, res) => {
       currentBalance.amount = oldBalance.amount - total;
     }
 
+    // Fetch user to check stockMode
+    const voucherUser = await User.findById(req.userId).session(session);
+    if (!voucherUser) {
+      throw notFound('User not found');
+    }
+
     let deductedFine = { gold: 0, silver: 0 };
-    if (usesStockAdjustment(paymentType)) {
+    // Only deduct from bulk stock if user is NOT in item mode
+    // Item mode tracks items individually, not bulk stock
+    if (voucherUser.stockMode !== 'item' && usesStockAdjustment(paymentType)) {
       deductedFine = getFineByMetal(cleanedItems);
       if (deductedFine.gold > 0 || deductedFine.silver > 0) {
         await deductFromStock(req.userId, deductedFine.gold, deductedFine.silver, { session });

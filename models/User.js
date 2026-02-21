@@ -88,6 +88,12 @@ const userSchema = new mongoose.Schema({
       default: 'full'
     }
   },
+  stockMode: {
+    type: String,
+    enum: ['bulk', 'item'],
+    default: 'bulk',
+    index: true
+  },
   theme: {
     type: String,
     enum: ['light', 'dark', 'system'],

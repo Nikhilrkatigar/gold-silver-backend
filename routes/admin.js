@@ -21,6 +21,7 @@ const mapUser = (user) => ({
   isActive: user.isActive,
   gstEnabled: user.gstEnabled,
   gstSettings: user.gstSettings,
+  stockMode: user.stockMode,
   createdAt: user.createdAt
 });
 
@@ -33,7 +34,8 @@ router.post('/users', async (req, res) => {
       shopName,
       password,
       gstEnabled = false,
-      gstSettings = {}
+      gstSettings = {},
+      stockMode = 'bulk'
     } = req.body;
     const phoneNumber = sanitizePhone(req.body.phoneNumber);
     const licenseDays = Number(req.body.licenseDays);
@@ -71,6 +73,7 @@ router.post('/users', async (req, res) => {
       licenseExpiryDate,
       role: 'user',
       createdBy: req.userId,
+      stockMode: ['bulk', 'item'].includes(stockMode) ? stockMode : 'bulk',
       gstEnabled: !!gstEnabled,
       gstSettings: {
         defaultGSTRate: gstSettings.defaultGSTRate ?? 18,

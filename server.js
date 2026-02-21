@@ -5,6 +5,21 @@ if (process.env.NODE_ENV !== 'production') {
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
+
+// Ensure upload directories exist
+const uploadDirs = [
+  path.join(__dirname, 'uploads'),
+  path.join(__dirname, 'uploads', 'qrcodes')
+];
+
+uploadDirs.forEach(dir => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+    console.log(`Created directory: ${dir}`);
+  }
+});
 
 const app = express();
 app.set('trust proxy', 1);
@@ -53,6 +68,11 @@ app.use('/api/settlement', require('./routes/settlement'));
 app.use('/api/stock', require('./routes/stock'));
 app.use('/api/karigar', require('./routes/karigar'));
 app.use('/api/expense', require('./routes/expense'));
+app.use('/api/category', require('./routes/category'));
+app.use('/api/item', require('./routes/item'));
+
+// Serve uploaded files (QR codes, etc.)
+app.use('/uploads', express.static('./uploads'));
 
 app.get('/api/health', (req, res) => {
   res.json({

@@ -1,6 +1,10 @@
 const mongoose = require('mongoose');
 
 const voucherItemSchema = new mongoose.Schema({
+  sourceItemId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Item'
+  },
   itemName: {
     type: String,
     required: true
