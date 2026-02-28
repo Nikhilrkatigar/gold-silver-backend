@@ -351,19 +351,6 @@ router.post('/', async (req, res) => {
       cleanedItems = [];
     }
 
-    // Validate gold/silver rates are > 0 only for CASH bills (credit bills can have rate=0)
-    if (paymentType === 'cash') {
-      const hasGoldItems = cleanedItems.some(item => item.metalType === 'gold');
-      const hasSilverItems = cleanedItems.some(item => item.metalType === 'silver');
-      if (hasGoldItems && toNumber(goldRate) <= 0) {
-        throw badRequest('Gold rate must be greater than 0 when billing gold items for cash');
-      }
-      if (hasSilverItems && toNumber(silverRate) <= 0) {
-        throw badRequest('Silver rate must be greater than 0 when billing silver items for cash');
-      }
-    }
-
-
     const ledger = await Ledger.findOne({
       _id: ledgerId,
       userId: req.userId
