@@ -351,15 +351,15 @@ router.post('/', async (req, res) => {
       cleanedItems = [];
     }
 
-    // Bug #7: Validate gold/silver rates are > 0 when billing metal items
-    if (BILLING_TYPES.includes(paymentType)) {
+    // Validate gold/silver rates are > 0 only for CASH bills (credit bills can have rate=0)
+    if (paymentType === 'cash') {
       const hasGoldItems = cleanedItems.some(item => item.metalType === 'gold');
       const hasSilverItems = cleanedItems.some(item => item.metalType === 'silver');
       if (hasGoldItems && toNumber(goldRate) <= 0) {
-        throw badRequest('Gold rate must be greater than 0 when billing gold items');
+        throw badRequest('Gold rate must be greater than 0 when billing gold items for cash');
       }
       if (hasSilverItems && toNumber(silverRate) <= 0) {
-        throw badRequest('Silver rate must be greater than 0 when billing silver items');
+        throw badRequest('Silver rate must be greater than 0 when billing silver items for cash');
       }
     }
 
