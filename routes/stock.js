@@ -7,32 +7,16 @@ const Karigar = require('../models/Karigar');
 const Ledger = require('../models/Ledger');
 const { auth, checkLicense } = require('../middleware/auth');
 const CONSTANTS = require('../utils/constants');
+const { createError, supportsTransactions, startOptionalSession } = require('../utils/helpers');
 
-const createError = (status, message, code) => {
-  const error = new Error(message);
-  error.status = status;
-  error.code = code;
-  return error;
-};
-
-const supportsTransactions = () => {
-  const topologyType = mongoose.connection?.client?.topology?.description?.type;
-  return Boolean(topologyType && topologyType !== 'Single');
-};
-
-const startOptionalSession = async () => {
-  if (!supportsTransactions()) return null;
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  return session;
-};
-
+// Stock-specific toNumber that throws on invalid values (stricter than the shared version)
 const toNumber = (value, fieldName) => {
   const number = Number(value ?? 0);
   if (!Number.isFinite(number)) {
     throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, `Invalid ${fieldName} value`, 'INVALID_NUMBER');
   }
   return number;
+
 };
 
 const toFiniteNumber = (value, fallback = 0) => {

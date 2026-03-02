@@ -6,8 +6,7 @@
 module.exports = {
   // JWT Configuration
   JWT: {
-    EXPIRY: '24h',
-    SECRET_KEY: process.env.JWT_SECRET || 'your-secret-key'
+    EXPIRY: '24h'
   },
 
   // Credit Payment Configuration

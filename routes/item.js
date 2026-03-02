@@ -6,52 +6,15 @@ const ItemTransaction = require('../models/ItemTransaction');
 const Category = require('../models/Category');
 const User = require('../models/User');
 const { auth, checkLicense } = require('../middleware/auth');
+const checkItemMode = require('../middleware/checkItemMode');
 const { generateItemQRCode, deleteItemQRCode } = require('../utils/qrCodeGenerator');
-
 const CONSTANTS = require('../utils/constants');
-
-const createError = (status, message, code) => {
-  const error = new Error(message);
-  error.status = status;
-  error.code = code;
-  return error;
-};
-
-const supportsTransactions = () => {
-  const topologyType = mongoose.connection?.client?.topology?.description?.type;
-  return Boolean(topologyType && topologyType !== 'Single');
-};
-
-const startOptionalSession = async () => {
-  if (!supportsTransactions()) return null;
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  return session;
-};
+const { createError, supportsTransactions, startOptionalSession } = require('../utils/helpers');
 
 // Apply middleware to all routes
 router.use(auth);
 router.use(checkLicense);
 
-// Verify user is in item mode
-const checkItemMode = async (req, res, next) => {
-  try {
-    const user = await User.findById(req.userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    if (user.stockMode !== 'item') {
-      return res.status(403).json({
-        success: false,
-        message: 'Item mode is not enabled for this user'
-      });
-    }
-    req.user = user;
-    next();
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Error verifying user mode' });
-  }
-};
 
 /**
  * Log item transaction (audit log)
@@ -164,7 +127,8 @@ router.post('/', checkItemMode, async (req, res) => {
       purchaseRate = 0,
       categoryId,
       huid,
-      hallmarkDate
+      hallmarkDate,
+      hsnCode
     } = req.body;
 
     // Validation
@@ -252,6 +216,7 @@ router.post('/', checkItemMode, async (req, res) => {
       categoryId,
       ...(huid ? { huid: String(huid).toUpperCase().trim() } : {}),
       ...(hallmarkDate ? { hallmarkDate: new Date(hallmarkDate) } : {}),
+      ...(hsnCode ? { hsnCode: String(hsnCode).trim() } : {}),
       status: 'available'
     };
 
@@ -366,7 +331,8 @@ router.put('/:id', checkItemMode, async (req, res) => {
       purchaseRate,
       categoryId,
       huid,
-      hallmarkDate
+      hallmarkDate,
+      hsnCode
     } = req.body;
 
     // Update fields
@@ -401,6 +367,7 @@ router.put('/:id', checkItemMode, async (req, res) => {
     }
     if (huid !== undefined) item.huid = huid ? String(huid).toUpperCase().trim() : '';
     if (hallmarkDate !== undefined) item.hallmarkDate = hallmarkDate ? new Date(hallmarkDate) : null;
+    if (hsnCode !== undefined) item.hsnCode = hsnCode ? String(hsnCode).trim() : '';
 
     // Always recompute costPrice after any field changes
     item.costPrice = (item.netWeight * (item.purchaseRate || 0)) + (item.labour || 0);

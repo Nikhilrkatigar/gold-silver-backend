@@ -5,8 +5,7 @@ const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const { auth } = require('../middleware/auth');
 const CONSTANTS = require('../utils/constants');
-
-const sanitizePhone = (phone) => String(phone || '').replace(/\D/g, '');
+const { sanitizePhone } = require('../utils/helpers');
 
 const generateToken = (userId) => (
   jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: CONSTANTS.JWT.EXPIRY })
@@ -31,6 +30,8 @@ const validateCreateAdmin = [
   body('password')
     .isLength({ min: CONSTANTS.VALIDATION.PASSWORD_MIN_LENGTH })
     .withMessage(`Password must be at least ${CONSTANTS.VALIDATION.PASSWORD_MIN_LENGTH} characters`)
+    .matches(CONSTANTS.VALIDATION.PASSWORD_REGEX)
+    .withMessage(CONSTANTS.ERROR_MESSAGES.INVALID_PASSWORD)
 ];
 
 const handleValidationErrors = (req, res, next) => {

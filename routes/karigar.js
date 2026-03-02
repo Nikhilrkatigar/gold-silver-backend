@@ -4,26 +4,10 @@ const Karigar = require('../models/Karigar');
 const { auth, checkLicense } = require('../middleware/auth');
 const { deductFromStock, addBackToStock } = require('./stock');
 const CONSTANTS = require('../utils/constants');
+const { toNumber, canReverse, getReversalWindowHours, parsePagination, paginationMeta } = require('../utils/helpers');
 
-const toNumber = (value, fallback = 0) => {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : fallback;
-};
 
-const getReversalWindowHours = () => {
-  const configured = toNumber(CONSTANTS.REVERSAL_POLICY?.WINDOW_HOURS, 48);
-  return configured > 0 ? configured : 48;
-};
-
-const canReverseForKarigar = (transaction) => {
-  const referenceDate = transaction?.createdAt ? new Date(transaction.createdAt) : null;
-  const referenceTime = referenceDate?.getTime();
-  if (!Number.isFinite(referenceTime)) return false;
-
-  const elapsedMs = Date.now() - referenceTime;
-  const allowedMs = getReversalWindowHours() * 60 * 60 * 1000;
-  return elapsedMs <= allowedMs;
-};
+const canReverseForKarigar = (transaction) => canReverse(transaction?.createdAt);
 
 router.use(auth);
 router.use(checkLicense);
@@ -106,14 +90,25 @@ router.post('/', async (req, res) => {
 
 router.get('/', async (req, res) => {
   try {
-    const transactions = await Karigar.find({
+    const { page, limit, skip } = parsePagination(req.query);
+
+    const filter = {
       userId: req.userId,
       isDeleted: false
-    }).sort({ date: -1 });
+    };
+
+    const [transactions, total] = await Promise.all([
+      Karigar.find(filter)
+        .sort({ date: -1 })
+        .skip(skip)
+        .limit(limit),
+      Karigar.countDocuments(filter)
+    ]);
 
     return res.json({
       success: true,
-      transactions
+      transactions,
+      pagination: paginationMeta(page, limit, total)
     });
   } catch (error) {
     console.error('Error fetching karigar transactions:', error);

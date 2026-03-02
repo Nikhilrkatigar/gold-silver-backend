@@ -3,14 +3,9 @@ const router = express.Router();
 const Ledger = require('../models/Ledger');
 const Voucher = require('../models/Voucher');
 const Settlement = require('../models/Settlement');
-const { auth, checkLicense } = require('../middleware/auth');
+const { auth, checkLicense, isAdmin } = require('../middleware/auth');
+const { toNumber, sanitizePhone, calculateUnifiedAmount, parsePagination, paginationMeta } = require('../utils/helpers');
 
-const sanitizePhone = (phone) => String(phone || '').replace(/\D/g, '');
-const toNumber = (value) => Number(value || 0);
-
-const calculateUnifiedAmount = (balances) => (
-  toNumber(balances.creditBalance) + toNumber(balances.cashBalance)
-);
 
 const resetBalances = () => ({
   goldFineWeight: 0,
@@ -46,8 +41,8 @@ router.post('/', async (req, res) => {
     // Accept both the nested openingBalance payload and legacy oldBal* fields.
     const incomingOpeningBalance = openingBalance ?? (
       req.body.oldBalAmount !== undefined ||
-      req.body.oldBalGold !== undefined ||
-      req.body.oldBalSilver !== undefined
+        req.body.oldBalGold !== undefined ||
+        req.body.oldBalSilver !== undefined
         ? {
           amount: req.body.oldBalAmount,
           goldFineWeight: req.body.oldBalGold,
@@ -124,9 +119,11 @@ router.get('/', async (req, res) => {
     }
 
     const ledgers = await Ledger.find(filter).sort({ name: 1 });
+
     return res.json({
       success: true,
-      ledgers
+      ledgers,
+      total: ledgers.length
     });
   } catch (error) {
     console.error('Get ledgers error:', error);
@@ -137,8 +134,8 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Migration: Fix ledgers without ledgerType (development endpoint)
-router.post('/migrate/fix-ledger-types', async (req, res) => {
+// Migration: Fix ledgers without ledgerType (admin-only endpoint)
+router.post('/migrate/fix-ledger-types', isAdmin, async (req, res) => {
   try {
     console.log('🔧 Starting ledger migration...');
 
@@ -305,8 +302,8 @@ router.patch('/:id', async (req, res) => {
     // Allow updating opening balance
     const incomingOpeningBalance = req.body.openingBalance ?? (
       req.body.oldBalAmount !== undefined ||
-      req.body.oldBalGold !== undefined ||
-      req.body.oldBalSilver !== undefined
+        req.body.oldBalGold !== undefined ||
+        req.body.oldBalSilver !== undefined
         ? {
           amount: req.body.oldBalAmount,
           goldFineWeight: req.body.oldBalGold,

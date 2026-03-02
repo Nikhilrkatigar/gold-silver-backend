@@ -5,30 +5,10 @@ const Ledger = require('../models/Ledger');
 const { auth, checkLicense } = require('../middleware/auth');
 const { deductFromStock, addBackToStock } = require('./stock');
 const CONSTANTS = require('../utils/constants');
+const { toNumber, canReverse, getReversalWindowHours, calculateUnifiedAmount } = require('../utils/helpers');
 
-const toNumber = (value, fallback = 0) => {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : fallback;
-};
+const canReverseForSettlement = (settlement) => canReverse(settlement?.createdAt);
 
-const getReversalWindowHours = () => {
-  const configured = toNumber(CONSTANTS.REVERSAL_POLICY?.WINDOW_HOURS, 48);
-  return configured > 0 ? configured : 48;
-};
-
-const canReverseForSettlement = (settlement) => {
-  const referenceDate = settlement?.createdAt ? new Date(settlement.createdAt) : null;
-  const referenceTime = referenceDate?.getTime();
-  if (!Number.isFinite(referenceTime)) return false;
-
-  const elapsedMs = Date.now() - referenceTime;
-  const allowedMs = getReversalWindowHours() * 60 * 60 * 1000;
-  return elapsedMs <= allowedMs;
-};
-
-const calculateUnifiedAmount = (balances) => (
-  toNumber(balances.creditBalance) + toNumber(balances.cashBalance)
-);
 
 router.use(auth);
 router.use(checkLicense);

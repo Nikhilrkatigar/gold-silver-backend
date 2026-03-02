@@ -7,19 +7,12 @@ const User = require('../models/User');
 const { auth, checkLicense } = require('../middleware/auth');
 const { deductFromStock, addBackToStock } = require('./stock');
 const CONSTANTS = require('../utils/constants');
-
-const toNumber = (value, fallback = 0) => {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-};
-
-const pickNumber = (...values) => {
-  for (const value of values) {
-    const n = Number(value);
-    if (Number.isFinite(n)) return n;
-  }
-  return 0;
-};
+const {
+  toNumber, pickNumber, badRequest, notFound,
+  supportsTransactions, startOptionalSession,
+  getReversalWindowHours, canReverse,
+  calculateUnifiedAmount, parsePagination, paginationMeta
+} = require('../utils/helpers');
 
 const sanitizeBalanceSnapshot = (incomingSnapshot, fallbackSnapshot) => ({
   oldBalance: {
@@ -35,34 +28,6 @@ const sanitizeBalanceSnapshot = (incomingSnapshot, fallbackSnapshot) => ({
     silverFineWeight: pickNumber(incomingSnapshot?.currentBalance?.silverFineWeight, fallbackSnapshot.currentBalance.silverFineWeight)
   }
 });
-
-const badRequest = (message) => {
-  const error = new Error(message);
-  error.status = 400;
-  return error;
-};
-
-const notFound = (message) => {
-  const error = new Error(message);
-  error.status = 404;
-  return error;
-};
-
-const supportsTransactions = () => {
-  const topologyType = mongoose.connection?.client?.topology?.description?.type;
-  return Boolean(topologyType && topologyType !== 'Single');
-};
-
-const startOptionalSession = async () => {
-  if (!supportsTransactions()) return null;
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  return session;
-};
-
-const calculateUnifiedAmount = (balances) => (
-  toNumber(balances.creditBalance) + toNumber(balances.cashBalance)
-);
 
 const calculateGSTBreakdown = (taxableAmount, gstRate, gstType) => {
   const rate = toNumber(gstRate);
@@ -145,20 +110,7 @@ const ALLOWED_TYPES = [...BILLING_TYPES, ...SETTLEMENT_TYPES];
 
 const usesStockAdjustment = (paymentType) => BILLING_TYPES.includes(paymentType);
 
-const getReversalWindowHours = () => {
-  const configured = toNumber(CONSTANTS.REVERSAL_POLICY?.WINDOW_HOURS, 48);
-  return configured > 0 ? configured : 48;
-};
-
-const canReverseForVoucher = (voucher) => {
-  const referenceDate = voucher?.createdAt ? new Date(voucher.createdAt) : null;
-  const referenceTime = referenceDate?.getTime();
-  if (!Number.isFinite(referenceTime)) return false;
-
-  const elapsedMs = Date.now() - referenceTime;
-  const allowedMs = getReversalWindowHours() * 60 * 60 * 1000;
-  return elapsedMs <= allowedMs;
-};
+const canReverseForVoucher = (voucher) => canReverse(voucher?.createdAt);
 
 const getVoucherStockAdjustment = (voucher) => {
   const explicitGold = toNumber(voucher?.stockAdjustment?.gold, null);
@@ -710,13 +662,21 @@ router.get('/', async (req, res) => {
       }
     }
 
-    const vouchers = await Voucher.find(query)
-      .populate('ledgerId', 'name phoneNumber')
-      .sort({ date: -1 });
+    const { page, limit, skip } = parsePagination(req.query);
+
+    const [vouchers, total] = await Promise.all([
+      Voucher.find(query)
+        .populate('ledgerId', 'name phoneNumber')
+        .sort({ date: -1 })
+        .skip(skip)
+        .limit(limit),
+      Voucher.countDocuments(query)
+    ]);
 
     return res.json({
       success: true,
-      vouchers
+      vouchers,
+      pagination: paginationMeta(page, limit, total)
     });
   } catch (error) {
     console.error('Get vouchers error:', error);

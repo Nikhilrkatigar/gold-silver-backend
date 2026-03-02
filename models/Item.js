@@ -10,11 +10,8 @@ const itemSchema = new mongoose.Schema({
   itemCode: {
     type: String,
     required: true,
-    unique: true,
-    sparse: true,
     trim: true,
-    uppercase: true,
-    index: true
+    uppercase: true
   },
   name: {
     type: String,
@@ -75,6 +72,11 @@ const itemSchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
+  // HSN/SAC code for GST invoices (defaults: 7113 gold jewellery, 7114 silver articles)
+  hsnCode: {
+    type: String,
+    trim: true
+  },
   categoryId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Category',
@@ -129,10 +131,21 @@ const itemSchema = new mongoose.Schema({
   timestamps: true
 });
 
+// Auto-default hsnCode based on metal type if not provided
+itemSchema.pre('save', function (next) {
+  if (!this.hsnCode) {
+    this.hsnCode = this.metal === 'gold' ? '7113' : '7114';
+  }
+  next();
+});
+
 // Compound index for user and status
 itemSchema.index({ userId: 1, status: 1 });
 
 // Compound index for user and created date
 itemSchema.index({ userId: 1, createdAt: -1 });
+
+// Compound unique index for item codes per tenant
+itemSchema.index({ userId: 1, itemCode: 1 }, { unique: true });
 
 module.exports = mongoose.model('Item', itemSchema);

@@ -7,8 +7,7 @@ const Settlement = require('../models/Settlement');
 const Karigar = require('../models/Karigar');
 const { Stock, StockInput } = require('../models/Stock');
 const { auth, isAdmin } = require('../middleware/auth');
-
-const sanitizePhone = (phone) => String(phone || '').replace(/\D/g, '');
+const { sanitizePhone } = require('../utils/helpers');
 
 const mapUser = (user) => ({
   id: user._id,
@@ -76,7 +75,7 @@ router.post('/users', async (req, res) => {
       stockMode: ['bulk', 'item'].includes(stockMode) ? stockMode : 'bulk',
       gstEnabled: !!gstEnabled,
       gstSettings: {
-        defaultGSTRate: gstSettings.defaultGSTRate ?? 18,
+        defaultGSTRate: gstSettings.defaultGSTRate ?? 3,
         gstEditPermission: gstSettings.gstEditPermission || 'user',
         gstNumber: gstSettings.gstNumber || undefined,
         businessState: gstSettings.businessState || undefined
@@ -106,62 +105,48 @@ router.get('/users', async (req, res) => {
     // Calculate storage usage for each user (in bytes)
     const usersWithStorage = await Promise.all(
       users.map(async (user) => {
-        // Calculate collection size by fetching documents and measuring their size
-        const calculateCollectionSize = async (Model) => {
-          try {
-            const documents = await Model.find({ userId: user._id }).lean();
-
-            if (documents.length === 0) {
-              return { totalSize: 0, count: 0 };
-            }
-
-            // Calculate size by converting to JSON and measuring byte length
-            const totalSize = documents.reduce((sum, doc) => {
-              // Convert to JSON string and get byte length
-              const jsonString = JSON.stringify(doc);
-              const byteLength = Buffer.byteLength(jsonString, 'utf8');
-              // Add ~20% overhead for BSON vs JSON (indexes, metadata, etc.)
-              return sum + Math.ceil(byteLength * 1.2);
-            }, 0);
-
-            return { totalSize, count: documents.length };
-          } catch (error) {
-            console.error(`Error calculating size for ${Model.modelName}:`, error);
-            return { totalSize: 0, count: 0 };
-          }
-        };
-
-        const [ledgerData, voucherData, settlementData, karigarData, stockData, stockInputData] = await Promise.all([
-          calculateCollectionSize(Ledger),
-          calculateCollectionSize(Voucher),
-          calculateCollectionSize(Settlement),
-          calculateCollectionSize(Karigar),
-          calculateCollectionSize(Stock),
-          calculateCollectionSize(StockInput)
+        // Use countDocuments instead of loading all docs into memory
+        const [ledgerCount, voucherCount, settlementCount, karigarCount, stockCount, stockInputCount] = await Promise.all([
+          Ledger.countDocuments({ userId: user._id }),
+          Voucher.countDocuments({ userId: user._id }),
+          Settlement.countDocuments({ userId: user._id }),
+          Karigar.countDocuments({ userId: user._id }),
+          Stock.countDocuments({ userId: user._id }),
+          StockInput.countDocuments({ userId: user._id })
         ]);
 
+        // Estimated average document sizes (bytes) per collection
+        const AVG_DOC_SIZE = {
+          ledger: 600,
+          voucher: 2500,
+          settlement: 500,
+          karigar: 400,
+          stock: 300,
+          stockInput: 200
+        };
+
         const totalBytes =
-          ledgerData.totalSize +
-          voucherData.totalSize +
-          settlementData.totalSize +
-          karigarData.totalSize +
-          stockData.totalSize +
-          stockInputData.totalSize;
+          ledgerCount * AVG_DOC_SIZE.ledger +
+          voucherCount * AVG_DOC_SIZE.voucher +
+          settlementCount * AVG_DOC_SIZE.settlement +
+          karigarCount * AVG_DOC_SIZE.karigar +
+          stockCount * AVG_DOC_SIZE.stock +
+          stockInputCount * AVG_DOC_SIZE.stockInput;
 
         return {
           ...mapUser(user),
           storageUsage: {
-            totalBytes: totalBytes,
+            totalBytes,
             totalKB: (totalBytes / 1024).toFixed(2),
             totalMB: (totalBytes / (1024 * 1024)).toFixed(2),
             totalGB: (totalBytes / (1024 * 1024 * 1024)).toFixed(4),
             breakdown: {
-              ledgers: { bytes: ledgerData.totalSize, count: ledgerData.count },
-              vouchers: { bytes: voucherData.totalSize, count: voucherData.count },
-              settlements: { bytes: settlementData.totalSize, count: settlementData.count },
-              karigars: { bytes: karigarData.totalSize, count: karigarData.count },
-              stock: { bytes: stockData.totalSize, count: stockData.count },
-              stockInputs: { bytes: stockInputData.totalSize, count: stockInputData.count }
+              ledgers: { count: ledgerCount, estimatedBytes: ledgerCount * AVG_DOC_SIZE.ledger },
+              vouchers: { count: voucherCount, estimatedBytes: voucherCount * AVG_DOC_SIZE.voucher },
+              settlements: { count: settlementCount, estimatedBytes: settlementCount * AVG_DOC_SIZE.settlement },
+              karigars: { count: karigarCount, estimatedBytes: karigarCount * AVG_DOC_SIZE.karigar },
+              stock: { count: stockCount, estimatedBytes: stockCount * AVG_DOC_SIZE.stock },
+              stockInputs: { count: stockInputCount, estimatedBytes: stockInputCount * AVG_DOC_SIZE.stockInput }
             }
           }
         };

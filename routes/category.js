@@ -4,36 +4,12 @@ const mongoose = require('mongoose');
 const Category = require('../models/Category');
 const User = require('../models/User');
 const { auth, checkLicense } = require('../middleware/auth');
-
-const createError = (status, message, code) => {
-  const error = new Error(message);
-  error.status = status;
-  error.code = code;
-  return error;
-};
+const checkItemMode = require('../middleware/checkItemMode');
+const { createError } = require('../utils/helpers');
 
 // Apply middleware to all routes
 router.use(auth);
 router.use(checkLicense);
-
-// Verify user is in item mode
-const checkItemMode = async (req, res, next) => {
-  try {
-    const user = await User.findById(req.userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    if (user.stockMode !== 'item') {
-      return res.status(403).json({
-        success: false,
-        message: 'Item mode is not enabled for this user'
-      });
-    }
-    next();
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Error verifying user mode' });
-  }
-};
 
 // Get all categories for user
 router.get('/', checkItemMode, async (req, res) => {

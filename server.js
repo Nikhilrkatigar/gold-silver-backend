@@ -52,7 +52,7 @@ app.use(cors({
     }
 
     console.warn(`CORS blocked request from origin: ${origin}`);
-    callback(null, true); // Kept permissive by request.
+    callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -102,8 +102,20 @@ app.use('/api/expense', require('./routes/expense'));
 app.use('/api/category', require('./routes/category'));
 app.use('/api/item', require('./routes/item'));
 
-// Serve uploaded files (QR codes, etc.)
-app.use('/uploads', express.static('./uploads'));
+// Serve uploaded files (QR codes, etc.) — protected by JWT
+const jwt = require('jsonwebtoken');
+app.use('/uploads', (req, res, next) => {
+  const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
+  if (!token) {
+    return res.status(401).json({ success: false, message: 'Authentication required' });
+  }
+  try {
+    jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch {
+    return res.status(401).json({ success: false, message: 'Invalid token' });
+  }
+}, express.static(path.join(__dirname, 'uploads')));
 
 app.get('/api/health', (req, res) => {
   res.json({
