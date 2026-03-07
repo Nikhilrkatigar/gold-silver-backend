@@ -88,6 +88,17 @@ const userSchema = new mongoose.Schema({
       default: 'full'
     }
   },
+  // per-user reversal policy. windowHours <=0 disables reversal entirely.
+  reversalSettings: {
+    enabled: {
+      type: Boolean,
+      default: true
+    },
+    windowHours: {
+      type: Number,
+      default: require('../utils/constants').REVERSAL_POLICY.WINDOW_HOURS
+    }
+  },
   stockMode: {
     type: String,
     enum: ['bulk', 'item'],

@@ -89,19 +89,32 @@ const getReversalWindowHours = () => {
 };
 
 /**
- * Generic time-window check — works for vouchers, settlements, karigar txns.
+ * Determine whether an item created at `createdAt` may be reversed based on
+ * the provided window (in hours). A window of <=0 indicates reversal is
+ * disabled and always returns false.
  * @param {Date|string} createdAt  The document's `createdAt` timestamp.
+ * @param {number} windowHours    Allowed hours for reversal.
  * @returns {boolean}
  */
-const canReverse = (createdAt) => {
+const canReverseWithWindow = (createdAt, windowHours) => {
     const referenceDate = createdAt ? new Date(createdAt) : null;
     const referenceTime = referenceDate?.getTime();
     if (!Number.isFinite(referenceTime)) return false;
 
+    if (!windowHours || windowHours <= 0) {
+        // explicitly disabled
+        return false;
+    }
+
     const elapsedMs = Date.now() - referenceTime;
-    const allowedMs = getReversalWindowHours() * 60 * 60 * 1000;
+    const allowedMs = windowHours * 60 * 60 * 1000;
     return elapsedMs <= allowedMs;
 };
+
+/**
+ * Backwards‑compatible wrapper that uses the global constant.
+ */
+const canReverse = (createdAt) => canReverseWithWindow(createdAt, getReversalWindowHours());
 
 // ───────────────────────── Pagination helper ─────────────────────
 
@@ -142,6 +155,7 @@ module.exports = {
     supportsTransactions,
     startOptionalSession,
     getReversalWindowHours,
+    canReverseWithWindow,
     canReverse,
     parsePagination,
     paginationMeta

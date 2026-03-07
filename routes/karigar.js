@@ -4,10 +4,22 @@ const Karigar = require('../models/Karigar');
 const { auth, checkLicense } = require('../middleware/auth');
 const { deductFromStock, addBackToStock } = require('./stock');
 const CONSTANTS = require('../utils/constants');
-const { toNumber, canReverse, getReversalWindowHours, parsePagination, paginationMeta } = require('../utils/helpers');
+const { toNumber, canReverse, canReverseWithWindow, getReversalWindowHours, parsePagination, paginationMeta } = require('../utils/helpers');
 
 
-const canReverseForKarigar = (transaction) => canReverse(transaction?.createdAt);
+const canReverseForKarigar = (transaction, user) => {
+  let windowHours;
+  if (user?.reversalSettings) {
+    if (user.reversalSettings.enabled === false) {
+      windowHours = 0;
+    } else {
+      windowHours = user.reversalSettings.windowHours ?? getReversalWindowHours();
+    }
+  } else {
+    windowHours = getReversalWindowHours();
+  }
+  return canReverseWithWindow(transaction?.createdAt, windowHours);
+};
 
 router.use(auth);
 router.use(checkLicense);
@@ -167,10 +179,16 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
-    if (!canReverseForKarigar(transaction)) {
+    const currentUser = await require('../models/User').findById(req.userId).select('reversalSettings');
+    if (!canReverseForKarigar(transaction, currentUser)) {
+      const window = currentUser?.reversalSettings
+        ? (currentUser.reversalSettings.enabled === false
+            ? 0
+            : (currentUser.reversalSettings.windowHours ?? getReversalWindowHours()))
+        : getReversalWindowHours();
       return res.status(400).json({
         success: false,
-        message: `Transaction cannot be deleted after ${getReversalWindowHours()} hours`
+        message: `Transaction cannot be deleted after ${window} hours`
       });
     }
 

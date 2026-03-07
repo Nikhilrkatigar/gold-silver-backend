@@ -10,7 +10,7 @@ const CONSTANTS = require('../utils/constants');
 const {
   toNumber, pickNumber, badRequest, notFound,
   supportsTransactions, startOptionalSession,
-  getReversalWindowHours, canReverse,
+  getReversalWindowHours, canReverse, canReverseWithWindow,
   calculateUnifiedAmount, parsePagination, paginationMeta
 } = require('../utils/helpers');
 
@@ -110,7 +110,20 @@ const ALLOWED_TYPES = [...BILLING_TYPES, ...SETTLEMENT_TYPES];
 
 const usesStockAdjustment = (paymentType) => BILLING_TYPES.includes(paymentType);
 
-const canReverseForVoucher = (voucher) => canReverse(voucher?.createdAt);
+// Determine reversal permission based on user-specific window or global default
+const canReverseForVoucher = (voucher, user) => {
+  let windowHours;
+  if (user?.reversalSettings) {
+    if (user.reversalSettings.enabled === false) {
+      windowHours = 0;
+    } else {
+      windowHours = user.reversalSettings.windowHours ?? getReversalWindowHours();
+    }
+  } else {
+    windowHours = getReversalWindowHours();
+  }
+  return canReverseWithWindow(voucher?.createdAt, windowHours);
+};
 
 const getVoucherStockAdjustment = (voucher) => {
   const explicitGold = toNumber(voucher?.stockAdjustment?.gold, null);
@@ -834,8 +847,16 @@ router.put('/:id', async (req, res) => {
       throw badRequest('Cancelled vouchers cannot be edited');
     }
 
-    if (!canReverseForVoucher(existingVoucher)) {
-      throw badRequest(`Voucher cannot be edited after ${getReversalWindowHours()} hours`);
+    // load current user's reversal policy
+    const currentUser = await User.findById(req.userId).select('reversalSettings');
+    if (!canReverseForVoucher(existingVoucher, currentUser)) {
+      // when policy is disabled windowHours will be 0, show a generic message
+      const window = currentUser?.reversalSettings
+        ? (currentUser.reversalSettings.enabled === false
+            ? 0
+            : (currentUser.reversalSettings.windowHours ?? getReversalWindowHours()))
+        : getReversalWindowHours();
+      throw badRequest(`Voucher cannot be edited after ${window} hours`);
     }
 
     const previousLedger = await Ledger.findOne({
@@ -1280,7 +1301,9 @@ router.patch('/:id', async (req, res) => {
       });
     }
 
-    const canReverse = canReverseForVoucher(voucher);
+    // use current user's reversal window
+    const currentUser = await User.findById(req.userId).select('reversalSettings');
+    const canReverse = canReverseForVoucher(voucher, currentUser);
 
     const ledger = await Ledger.findById(voucher.ledgerId).session(session);
     if (ledger && canReverse) {
@@ -1306,11 +1329,17 @@ router.patch('/:id', async (req, res) => {
       await session.commitTransaction();
     }
 
+    const windowHours = currentUser?.reversalSettings
+      ? (currentUser.reversalSettings.enabled === false
+          ? 0
+          : (currentUser.reversalSettings.windowHours ?? getReversalWindowHours()))
+      : getReversalWindowHours();
+
     return res.json({
       success: true,
       message: canReverse
         ? 'Voucher cancelled successfully'
-        : `Voucher cancelled without reversal (older than ${getReversalWindowHours()} hours)`,
+        : `Voucher cancelled without reversal (older than ${windowHours} hours)`,
       voucher
     });
   } catch (error) {
@@ -1344,7 +1373,8 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
-    const canReverse = canReverseForVoucher(voucher);
+    const currentUser = await User.findById(req.userId).select('reversalSettings');
+    const canReverse = canReverseForVoucher(voucher, currentUser);
 
     const ledger = await Ledger.findById(voucher.ledgerId).session(session);
     if (ledger) {
@@ -1380,11 +1410,17 @@ router.delete('/:id', async (req, res) => {
       await session.commitTransaction();
     }
 
+    const windowHours = currentUser?.reversalSettings
+      ? (currentUser.reversalSettings.enabled === false
+          ? 0
+          : (currentUser.reversalSettings.windowHours ?? getReversalWindowHours()))
+      : getReversalWindowHours();
+
     return res.json({
       success: true,
       message: canReverse
         ? 'Voucher deleted successfully'
-        : `Voucher deleted without reversal (older than ${getReversalWindowHours()} hours)`
+        : `Voucher deleted without reversal (older than ${windowHours} hours)`
     });
   } catch (error) {
     if (session?.inTransaction()) {

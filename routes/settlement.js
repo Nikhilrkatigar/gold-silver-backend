@@ -5,9 +5,22 @@ const Ledger = require('../models/Ledger');
 const { auth, checkLicense } = require('../middleware/auth');
 const { deductFromStock, addBackToStock } = require('./stock');
 const CONSTANTS = require('../utils/constants');
-const { toNumber, canReverse, getReversalWindowHours, calculateUnifiedAmount } = require('../utils/helpers');
+const { toNumber, canReverse, canReverseWithWindow, getReversalWindowHours, calculateUnifiedAmount } = require('../utils/helpers');
 
-const canReverseForSettlement = (settlement) => canReverse(settlement?.createdAt);
+// user-aware reversal helper
+const canReverseForSettlement = (settlement, user) => {
+  let windowHours;
+  if (user?.reversalSettings) {
+    if (user.reversalSettings.enabled === false) {
+      windowHours = 0;
+    } else {
+      windowHours = user.reversalSettings.windowHours ?? getReversalWindowHours();
+    }
+  } else {
+    windowHours = getReversalWindowHours();
+  }
+  return canReverseWithWindow(settlement?.createdAt, windowHours);
+};
 
 
 router.use(auth);
@@ -264,10 +277,17 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
-    if (!canReverseForSettlement(settlement)) {
+    // retrieve user-specific policy
+    const currentUser = await require('../models/User').findById(req.userId).select('reversalSettings');
+    if (!canReverseForSettlement(settlement, currentUser)) {
+      const window = currentUser?.reversalSettings
+        ? (currentUser.reversalSettings.enabled === false
+            ? 0
+            : (currentUser.reversalSettings.windowHours ?? getReversalWindowHours()))
+        : getReversalWindowHours();
       return res.status(400).json({
         success: false,
-        message: `Settlement cannot be deleted after ${getReversalWindowHours()} hours`
+        message: `Settlement cannot be deleted after ${window} hours`
       });
     }
 

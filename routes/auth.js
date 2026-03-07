@@ -56,6 +56,7 @@ const mapUser = (user) => ({
   gstEnabled: user.gstEnabled,
   gstSettings: user.gstSettings,
   labourChargeSettings: user.labourChargeSettings,
+  reversalSettings: user.reversalSettings,
   stockMode: user.stockMode,
   daysUntilExpiry: user.getDaysUntilExpiry?.(),
   isLicenseExpired: user.isLicenseExpired?.()
@@ -128,7 +129,7 @@ router.get('/me', auth, async (req, res) => {
 
 router.patch('/settings', auth, async (req, res) => {
   try {
-    const { theme, voucherSettings, gstSettings, labourChargeSettings } = req.body;
+    const { theme, voucherSettings, gstSettings, labourChargeSettings, reversalSettings } = req.body;
     const user = await User.findById(req.userId);
 
     if (!user) {
@@ -187,6 +188,30 @@ router.patch('/settings', auth, async (req, res) => {
       user.labourChargeSettings = {
         ...(user.labourChargeSettings?.toObject?.() || user.labourChargeSettings || {}),
         ...labourChargeSettings
+      };
+    }
+
+    if (reversalSettings) {
+      // validate values: enabled boolean, windowHours >= 0
+      if (reversalSettings.enabled !== undefined && typeof reversalSettings.enabled !== 'boolean') {
+        return res.status(CONSTANTS.HTTP_STATUS.BAD_REQUEST).json({
+          success: false,
+          message: 'reversalSettings.enabled must be a boolean'
+        });
+      }
+      if (reversalSettings.windowHours !== undefined) {
+        const wh = Number(reversalSettings.windowHours);
+        if (!Number.isFinite(wh) || wh < 0) {
+          return res.status(CONSTANTS.HTTP_STATUS.BAD_REQUEST).json({
+            success: false,
+            message: 'reversalSettings.windowHours must be a non-negative number'
+          });
+        }
+      }
+
+      user.reversalSettings = {
+        ...(user.reversalSettings?.toObject?.() || user.reversalSettings || {}),
+        ...reversalSettings
       };
     }
 

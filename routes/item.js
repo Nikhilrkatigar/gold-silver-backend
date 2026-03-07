@@ -172,7 +172,21 @@ router.post('/', checkItemMode, async (req, res) => {
     // Generate unique item code if not provided
     let finalItemCode = itemCode;
     if (!finalItemCode) {
-      finalItemCode = `${metal.charAt(0).toUpperCase()}${Date.now()}`;
+      // Generate a short 5-digit numeric code unique to this user
+      let attempts = 0;
+      do {
+        finalItemCode = String(Math.floor(10000 + Math.random() * 90000));
+        const exists = await Item.findOne({ userId: req.userId, itemCode: finalItemCode });
+        if (!exists) break;
+        attempts++;
+      } while (attempts < 20);
+
+      if (attempts >= 20) {
+        return res.status(500).json({
+          success: false,
+          message: 'Unable to generate unique item code. Please enter one manually.'
+        });
+      }
     } else {
       // Check if code is unique
       const existingItem = await Item.findOne({ itemCode: finalItemCode });
