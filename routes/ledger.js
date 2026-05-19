@@ -3,6 +3,7 @@ const router = express.Router();
 const Ledger = require('../models/Ledger');
 const Voucher = require('../models/Voucher');
 const Settlement = require('../models/Settlement');
+const { addBackToStock, deductFromStock } = require('./stock');
 const { auth, checkLicense, isAdmin } = require('../middleware/auth');
 const { toNumber, sanitizePhone, calculateUnifiedAmount, parsePagination, paginationMeta } = require('../utils/helpers');
 
@@ -14,6 +15,31 @@ const resetBalances = () => ({
   cashBalance: 0,
   creditBalance: 0
 });
+
+const getOpeningMetalBalances = (openingBalance = {}) => ({
+  goldFineWeight: toNumber(openingBalance.goldFineWeight),
+  silverFineWeight: toNumber(openingBalance.silverFineWeight)
+});
+
+const syncOpeningBalanceStock = async (userId, previousOpeningBalance = {}, nextOpeningBalance = {}) => {
+  const previousMetal = getOpeningMetalBalances(previousOpeningBalance);
+  const nextMetal = getOpeningMetalBalances(nextOpeningBalance);
+
+  const goldDelta = nextMetal.goldFineWeight - previousMetal.goldFineWeight;
+  const silverDelta = nextMetal.silverFineWeight - previousMetal.silverFineWeight;
+
+  if (goldDelta === 0 && silverDelta === 0) {
+    return;
+  }
+
+  if (goldDelta > 0 || silverDelta > 0) {
+    await addBackToStock(userId, Math.max(0, goldDelta), Math.max(0, silverDelta));
+  }
+
+  if (goldDelta < 0 || silverDelta < 0) {
+    await deductFromStock(userId, Math.max(0, -goldDelta), Math.max(0, -silverDelta));
+  }
+};
 
 router.use(auth);
 router.use(checkLicense);
@@ -84,6 +110,13 @@ router.post('/', async (req, res) => {
     });
 
     await ledger.save();
+
+    if (ledger.ledgerType !== 'gst') {
+      await syncOpeningBalanceStock(req.userId, {}, {
+        goldFineWeight: obGold,
+        silverFineWeight: obSilver
+      });
+    }
 
     return res.status(201).json({
       success: true,
@@ -273,6 +306,17 @@ router.patch('/:id', async (req, res) => {
     const updates = {};
     const { name, gstDetails, ledgerType } = req.body;
     const phoneNumber = req.body.phoneNumber ? sanitizePhone(req.body.phoneNumber) : undefined;
+    const existingLedger = await Ledger.findOne({
+      _id: req.params.id,
+      userId: req.userId
+    });
+
+    if (!existingLedger) {
+      return res.status(404).json({
+        success: false,
+        message: 'Ledger not found'
+      });
+    }
 
     if (name !== undefined) updates.name = name.trim();
 
@@ -326,36 +370,44 @@ router.patch('/:id', async (req, res) => {
       { new: true, runValidators: true }
     );
 
-    if (!ledger) {
-      return res.status(404).json({
-        success: false,
-        message: 'Ledger not found'
-      });
-    }
-
     // If opening balance was updated and there are no transactions yet,
     // keep current balances aligned with the new opening values.
-    if (updates.openingBalance !== undefined) {
-      const [voucherCount, settlementCount] = await Promise.all([
-        Voucher.countDocuments({ userId: req.userId, ledgerId: req.params.id }),
-        Settlement.countDocuments({ userId: req.userId, ledgerId: req.params.id })
-      ]);
+    const [voucherCount, settlementCount] = await Promise.all([
+      Voucher.countDocuments({ userId: req.userId, ledgerId: req.params.id }),
+      Settlement.countDocuments({ userId: req.userId, ledgerId: req.params.id })
+    ]);
 
-      if (voucherCount === 0 && settlementCount === 0) {
-        if (ledger.ledgerType === 'gst') {
-          ledger.balances = resetBalances();
-        } else {
-          ledger.balances = {
-            ...ledger.balances,
-            goldFineWeight: toNumber(updates.openingBalance.goldFineWeight),
-            silverFineWeight: toNumber(updates.openingBalance.silverFineWeight),
-            cashBalance: toNumber(updates.openingBalance.amount),
-            creditBalance: 0,
-            amount: toNumber(updates.openingBalance.amount)
-          };
-        }
-        await ledger.save();
+    if (voucherCount === 0 && settlementCount === 0) {
+      const nextLedgerType = updates.ledgerType || existingLedger.ledgerType;
+      const previousOpeningBalance = existingLedger.openingBalance || {};
+      const nextOpeningBalance = updates.openingBalance || previousOpeningBalance;
+
+      if (existingLedger.ledgerType !== 'gst' && nextLedgerType === 'gst') {
+        await syncOpeningBalanceStock(req.userId, previousOpeningBalance, {});
+        ledger.balances = resetBalances();
+      } else if (existingLedger.ledgerType === 'gst' && nextLedgerType !== 'gst') {
+        await syncOpeningBalanceStock(req.userId, {}, nextOpeningBalance);
+        ledger.balances = {
+          ...ledger.balances,
+          goldFineWeight: toNumber(nextOpeningBalance.goldFineWeight),
+          silverFineWeight: toNumber(nextOpeningBalance.silverFineWeight),
+          cashBalance: toNumber(nextOpeningBalance.amount),
+          creditBalance: 0,
+          amount: toNumber(nextOpeningBalance.amount)
+        };
+      } else if (nextLedgerType !== 'gst' && updates.openingBalance !== undefined) {
+        await syncOpeningBalanceStock(req.userId, previousOpeningBalance, nextOpeningBalance);
+        ledger.balances = {
+          ...ledger.balances,
+          goldFineWeight: toNumber(nextOpeningBalance.goldFineWeight),
+          silverFineWeight: toNumber(nextOpeningBalance.silverFineWeight),
+          cashBalance: toNumber(nextOpeningBalance.amount),
+          creditBalance: 0,
+          amount: toNumber(nextOpeningBalance.amount)
+        };
       }
+
+      await ledger.save();
     }
 
     return res.json({
@@ -396,6 +448,10 @@ router.delete('/:id', async (req, res) => {
         success: false,
         message: 'Cannot delete ledger with transactions. Delete vouchers/settlements first.'
       });
+    }
+
+    if (ledger.ledgerType !== 'gst') {
+      await syncOpeningBalanceStock(req.userId, ledger.openingBalance || {}, {});
     }
 
     await Ledger.findByIdAndDelete(req.params.id);
