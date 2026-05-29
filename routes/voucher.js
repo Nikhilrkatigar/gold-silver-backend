@@ -110,6 +110,32 @@ const ALLOWED_TYPES = [...BILLING_TYPES, ...SETTLEMENT_TYPES];
 
 const usesStockAdjustment = (paymentType) => BILLING_TYPES.includes(paymentType);
 
+const getSettlementStockAdjustment = (paymentType, cashReceived) => {
+  const settlementValue = toNumber(cashReceived);
+
+  if (paymentType === 'add_gold') {
+    return { gold: -settlementValue, silver: 0 };
+  }
+
+  if (paymentType === 'add_silver') {
+    return { gold: 0, silver: -settlementValue };
+  }
+
+  return { gold: 0, silver: 0 };
+};
+
+const getRequestStockAdjustment = (paymentType, items = [], cashReceived = 0) => {
+  if (BILLING_TYPES.includes(paymentType)) {
+    return getFineByMetal(items);
+  }
+
+  return getSettlementStockAdjustment(paymentType, cashReceived);
+};
+
+const getStockAdjustmentVoucherType = (voucher) => (
+  SETTLEMENT_TYPES.includes(voucher?.paymentType) ? 'sale' : (voucher?.voucherType || 'sale')
+);
+
 // Determine reversal permission based on user-specific window or global default
 const canReverseForVoucher = (voucher, user) => {
   let windowHours;
@@ -156,7 +182,7 @@ const reverseVoucherEffects = async (voucher, ledger, options = {}) => {
     await applyStockAdjustmentForVoucher(
       voucher.userId,
       stockAdjustment,
-      voucher.voucherType || 'sale',
+      getStockAdjustmentVoucherType(voucher),
       { session, reverse: true }
     );
     if (markRestored) {
@@ -449,10 +475,15 @@ router.post('/', async (req, res) => {
 
     let stockAdjustment = { gold: 0, silver: 0 };
     // Only adjust bulk stock if user is NOT in item mode
-    if (user.stockMode !== 'item' && usesStockAdjustment(paymentType)) {
-      stockAdjustment = getFineByMetal(cleanedItems);
+    if (user.stockMode !== 'item') {
+      stockAdjustment = getRequestStockAdjustment(paymentType, cleanedItems, cashReceived);
       if (hasNonZeroStockAdjustment(stockAdjustment)) {
-        await applyStockAdjustmentForVoucher(req.userId, stockAdjustment, voucherType, { session });
+        await applyStockAdjustmentForVoucher(
+          req.userId,
+          stockAdjustment,
+          getStockAdjustmentVoucherType({ paymentType, voucherType }),
+          { session }
+        );
       }
     }
 
@@ -1070,10 +1101,15 @@ router.put('/:id', async (req, res) => {
 
     let stockAdjustment = { gold: 0, silver: 0 };
     // Item mode tracks items individually, not bulk stock
-    if (voucherUser.stockMode !== 'item' && usesStockAdjustment(paymentType)) {
-      stockAdjustment = getFineByMetal(cleanedItems);
+    if (voucherUser.stockMode !== 'item') {
+      stockAdjustment = getRequestStockAdjustment(paymentType, cleanedItems, cashReceived);
       if (hasNonZeroStockAdjustment(stockAdjustment)) {
-        await applyStockAdjustmentForVoucher(req.userId, stockAdjustment, voucherType, { session });
+        await applyStockAdjustmentForVoucher(
+          req.userId,
+          stockAdjustment,
+          getStockAdjustmentVoucherType({ paymentType, voucherType }),
+          { session }
+        );
       }
     }
 
@@ -1386,7 +1422,7 @@ router.delete('/:id', async (req, res) => {
           await applyStockAdjustmentForVoucher(
             voucher.userId,
             adjustment,
-            voucher.voucherType || 'sale',
+            getStockAdjustmentVoucherType(voucher),
             { session, reverse: true }
           );
         }
