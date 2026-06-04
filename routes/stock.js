@@ -133,10 +133,23 @@ router.get('/', async (req, res) => {
     // It starts at 0 so stock.cashInHand = -(totalStockCash + totalCashExpenses)
     const stockCashOutflow = -(stock.cashInHand || 0); // convert to positive outflow number
 
-    // Karigar making charges — cash paid for labour/making
+    // Karigar amount balance: given adds to the tracked amount, received subtracts.
     const karigarAgg = await Karigar.aggregate([
       { $match: { userId: stock.userId, isDeleted: { $ne: true } } },
-      { $group: { _id: null, totalCharges: { $sum: { $ifNull: ['$chargeAmount', 0] } } } }
+      {
+        $group: {
+          _id: null,
+          totalCharges: {
+            $sum: {
+              $cond: [
+                { $eq: ['$type', 'received'] },
+                { $multiply: [{ $ifNull: ['$chargeAmount', 0] }, -1] },
+                { $ifNull: ['$chargeAmount', 0] }
+              ]
+            }
+          }
+        }
+      }
     ]);
     const totalKarigarCharges = karigarAgg[0]?.totalCharges || 0;
 

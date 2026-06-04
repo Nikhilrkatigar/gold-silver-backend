@@ -36,7 +36,7 @@ router.post('/', async (req, res) => {
     } = req.body;
 
     const fineWeight = toNumber(req.body.fineWeight);
-    const chargeAmount = Math.max(0, toNumber(req.body.chargeAmount));
+    const chargeAmount = toNumber(req.body.chargeAmount);
 
     if (!type || !karigarName || !itemName || !metalType) {
       return res.status(400).json({
@@ -59,17 +59,33 @@ router.post('/', async (req, res) => {
       });
     }
 
-    if (fineWeight <= 0) {
+    if (fineWeight < 0) {
       return res.status(400).json({
         success: false,
-        message: 'fineWeight must be greater than 0'
+        message: 'fineWeight cannot be negative'
       });
     }
 
-    if (type === 'given') {
-      await deductFromStock(req.userId, metalType === 'gold' ? fineWeight : 0, metalType === 'silver' ? fineWeight : 0);
-    } else {
-      await addBackToStock(req.userId, metalType === 'gold' ? fineWeight : 0, metalType === 'silver' ? fineWeight : 0);
+    if (chargeAmount < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'chargeAmount cannot be negative'
+      });
+    }
+
+    if (fineWeight <= 0 && chargeAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Enter fineWeight or chargeAmount'
+      });
+    }
+
+    if (fineWeight > 0) {
+      if (type === 'given') {
+        await deductFromStock(req.userId, metalType === 'gold' ? fineWeight : 0, metalType === 'silver' ? fineWeight : 0);
+      } else {
+        await addBackToStock(req.userId, metalType === 'gold' ? fineWeight : 0, metalType === 'silver' ? fineWeight : 0);
+      }
     }
 
     const transaction = new Karigar({
