@@ -6,6 +6,7 @@ const stockInputSchema = new mongoose.Schema({
   cashAmount: { type: Number, default: 0 },
   date: { type: Date, default: Date.now },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  type: { type: String, enum: ['stock_purchase', 'cash_addition'], default: 'stock_purchase' },
 });
 
 const StockInput = mongoose.model('StockInput', stockInputSchema);

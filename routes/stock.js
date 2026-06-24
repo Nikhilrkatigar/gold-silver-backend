@@ -5,6 +5,7 @@ const { Stock, StockInput } = require('../models/Stock');
 const Voucher = require('../models/Voucher');
 const Karigar = require('../models/Karigar');
 const Ledger = require('../models/Ledger');
+const Expense = require('../models/Expense');
 const { auth, checkLicense } = require('../middleware/auth');
 const CONSTANTS = require('../utils/constants');
 const { createError, supportsTransactions, startOptionalSession } = require('../utils/helpers');
@@ -127,11 +128,48 @@ router.get('/', async (req, res) => {
       return sum + Math.max(0, -amountBalance);
     }, 0);
 
-    // stock.cashInHand is decremented when:
-    //   a) stock is purchased with cash  (stock/add route: $inc cashInHand: -cashAmount)
-    //   b) cash expenses are paid        (expense route: $inc cashInHand: -amount)
-    // It starts at 0 so stock.cashInHand = -(totalStockCash + totalCashExpenses)
-    const stockCashOutflow = -(stock.cashInHand || 0); // convert to positive outflow number
+    // Aggregate StockInput to get stock purchases cash and manual cash added
+    const stockInputAgg = await StockInput.aggregate([
+      { $match: { userId: stock.userId } },
+      {
+        $group: {
+          _id: null,
+          totalStockPurchaseCash: {
+            $sum: {
+              $cond: [
+                { $ne: ['$type', 'cash_addition'] },
+                '$cashAmount',
+                0
+              ]
+            }
+          },
+          totalCashAdded: {
+            $sum: {
+              $cond: [
+                { $eq: ['$type', 'cash_addition'] },
+                '$cashAmount',
+                0
+              ]
+            }
+          }
+        }
+      }
+    ]);
+
+    const totalStockPurchaseCash = stockInputAgg[0]?.totalStockPurchaseCash || 0;
+    const totalCashAdded = stockInputAgg[0]?.totalCashAdded || 0;
+
+    // Aggregate Expense to get cash expenses
+    const expenseAgg = await Expense.aggregate([
+      { $match: { userId: stock.userId, paymentMethod: 'cash' } },
+      {
+        $group: {
+          _id: null,
+          totalExpenseCash: { $sum: '$amount' }
+        }
+      }
+    ]);
+    const totalExpenseCash = expenseAgg[0]?.totalExpenseCash || 0;
 
     // Karigar amount balance: given adds to the tracked amount, received subtracts.
     const karigarAgg = await Karigar.aggregate([
@@ -154,17 +192,21 @@ router.get('/', async (req, res) => {
     const totalKarigarCharges = karigarAgg[0]?.totalCharges || 0;
 
     // Net Cash in Hand (can be negative if shop has overpaid or has unpaid obligations)
-    const calculatedCashInHand = totalSaleCash - totalPurchasePaid - stockCashOutflow - totalKarigarCharges;
+    const calculatedCashInHand = totalSaleCash + totalCashAdded - totalPurchasePaid - totalStockPurchaseCash - totalExpenseCash - totalKarigarCharges;
 
     const stockObj = stock.toObject();
     stockObj.calculatedCashInHand = calculatedCashInHand;
     // Expose breakdown so frontend can show details
     stockObj.cashBreakdown = {
       cashFromSales: totalSaleCash,
+      cashAdded: totalCashAdded,
       customerLiabilities,
       paidForPurchases: totalPurchasePaid,
-      stockAndExpenses: stockCashOutflow,
+      stockPurchases: totalStockPurchaseCash,
+      cashExpenses: totalExpenseCash,
       karigarCharges: totalKarigarCharges,
+      // Keep stockAndExpenses for backward compatibility
+      stockAndExpenses: totalStockPurchaseCash + totalExpenseCash - totalCashAdded,
       net: calculatedCashInHand
     };
 
@@ -234,6 +276,62 @@ router.post('/add', async (req, res) => {
   }
 });
 
+// Add cash/money to cash balance for user
+router.post('/add-cash', async (req, res) => {
+  const session = await startOptionalSession();
+  try {
+    const amount = toNumber(req.body.amount, 'amount');
+    const inputDate = req.body.dateTime ? new Date(req.body.dateTime) : new Date();
+
+    if (amount <= 0) {
+      throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, 'Amount must be greater than zero', 'INVALID_AMOUNT');
+    }
+
+    if (Number.isNaN(inputDate.getTime())) {
+      throw createError(CONSTANTS.HTTP_STATUS.BAD_REQUEST, 'Invalid date/time', 'INVALID_DATE');
+    }
+
+    // Atomically increment Stock.cashInHand to prevent race conditions
+    let stockUpdateQuery = Stock.findOneAndUpdate(
+      { userId: req.userId },
+      {
+        $inc: { cashInHand: amount },
+        $set: { updatedAt: new Date() }
+      },
+      { new: true }
+    );
+    if (session) stockUpdateQuery = stockUpdateQuery.session(session);
+    const stock = await stockUpdateQuery;
+
+    await StockInput.create([{
+      userId: req.userId,
+      gold: 0,
+      silver: 0,
+      cashAmount: amount,
+      date: inputDate,
+      type: 'cash_addition'
+    }], session ? { session } : {});
+
+    if (session?.inTransaction()) {
+      await session.commitTransaction();
+    }
+
+    res.json({ success: true, stock });
+  } catch (error) {
+    if (session?.inTransaction()) {
+      await session.abortTransaction();
+    }
+    res.status(error.status || CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
+      success: false,
+      message: error.message || 'Error adding cash'
+    });
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
+  }
+});
+
 // Get stock input history for user
 router.get('/history', async (req, res) => {
   try {
@@ -290,8 +388,13 @@ router.post('/undo', async (req, res) => {
     stock.gold = updatedGold;
     stock.silver = updatedSilver;
 
-    // Add back the cash amount to cashInHand
-    stock.cashInHand = (stock.cashInHand || 0) + cashAmount;
+    // If it was a cash addition, we decrement cashInHand (take the cash out).
+    // Otherwise, we add it back (reclaim the cash paid for stock).
+    if (lastInput.type === 'cash_addition') {
+      stock.cashInHand = (stock.cashInHand || 0) - cashAmount;
+    } else {
+      stock.cashInHand = (stock.cashInHand || 0) + cashAmount;
+    }
 
     stock.updatedAt = new Date();
     await stock.save({ session });

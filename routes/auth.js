@@ -129,7 +129,7 @@ router.get('/me', auth, async (req, res) => {
 
 router.patch('/settings', auth, async (req, res) => {
   try {
-    const { theme, voucherSettings, gstSettings, labourChargeSettings, reversalSettings } = req.body;
+    const { theme, voucherSettings, gstSettings, labourChargeSettings, reversalSettings, phoneNumber, shopName } = req.body;
     const user = await User.findById(req.userId);
 
     if (!user) {
@@ -137,6 +137,35 @@ router.patch('/settings', auth, async (req, res) => {
         success: false,
         message: 'User not found'
       });
+    }
+
+    if (phoneNumber !== undefined) {
+      const sanitizedPhone = String(phoneNumber).replace(/\D/g, '');
+      if (!/^[0-9]{10}$/.test(sanitizedPhone)) {
+        return res.status(CONSTANTS.HTTP_STATUS.BAD_REQUEST).json({
+          success: false,
+          message: 'Phone number must be exactly 10 digits'
+        });
+      }
+      const existingUser = await User.findOne({ phoneNumber: sanitizedPhone, _id: { $ne: req.userId } });
+      if (existingUser) {
+        return res.status(CONSTANTS.HTTP_STATUS.BAD_REQUEST).json({
+          success: false,
+          message: 'Phone number is already registered by another user'
+        });
+      }
+      user.phoneNumber = sanitizedPhone;
+    }
+
+    if (shopName !== undefined) {
+      const trimmedShopName = String(shopName).trim();
+      if (trimmedShopName.length < 2) {
+        return res.status(CONSTANTS.HTTP_STATUS.BAD_REQUEST).json({
+          success: false,
+          message: 'Shop name must be at least 2 characters long'
+        });
+      }
+      user.shopName = trimmedShopName;
     }
 
     if (theme !== undefined) {
