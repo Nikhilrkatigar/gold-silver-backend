@@ -171,7 +171,7 @@ router.get('/', async (req, res) => {
     ]);
     const totalExpenseCash = expenseAgg[0]?.totalExpenseCash || 0;
 
-    // Karigar amount balance: given adds to the tracked amount, received subtracts.
+    // Karigar amount balance: given is ignored, received subtracts from cash-in-hand.
     const karigarAgg = await Karigar.aggregate([
       { $match: { userId: stock.userId, isDeleted: { $ne: true } } },
       {
@@ -181,8 +181,8 @@ router.get('/', async (req, res) => {
             $sum: {
               $cond: [
                 { $eq: ['$type', 'received'] },
-                { $multiply: [{ $ifNull: ['$chargeAmount', 0] }, -1] },
-                { $ifNull: ['$chargeAmount', 0] }
+                { $ifNull: ['$chargeAmount', 0] },
+                0
               ]
             }
           }
