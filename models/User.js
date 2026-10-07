@@ -110,6 +110,13 @@ const userSchema = new mongoose.Schema({
     enum: ['light', 'dark', 'system'],
     default: 'system'
   },
+  // UI language chosen on first visit; unset means "ask"
+  language: {
+    type: String,
+    enum: ['en', 'kn', 'hi']
+  },
+  // Set when the first-visit guide is finished or skipped
+  onboardedAt: Date,
   isActive: {
     type: Boolean,
     default: true

@@ -39,6 +39,8 @@ const mapUser = (user) => ({
   role: user.role,
   licenseExpiryDate: user.licenseExpiryDate,
   theme: user.theme,
+  language: user.language || null,
+  onboarded: Boolean(user.onboardedAt),
   voucherSettings: user.voucherSettings,
   gstEnabled: user.gstEnabled,
   gstSettings: user.gstSettings,
@@ -116,7 +118,7 @@ router.get('/me', auth, async (req, res) => {
 
 router.patch('/settings', auth, async (req, res) => {
   try {
-    const { theme, voucherSettings, gstSettings, labourChargeSettings, reversalSettings, phoneNumber, shopName } = req.body;
+    const { theme, language, onboarded, voucherSettings, gstSettings, labourChargeSettings, reversalSettings, phoneNumber, shopName } = req.body;
     const user = await User.findById(req.userId);
 
     if (!user) {
@@ -153,6 +155,20 @@ router.patch('/settings', auth, async (req, res) => {
         });
       }
       user.shopName = trimmedShopName;
+    }
+
+    if (language !== undefined) {
+      if (!['en', 'kn', 'hi'].includes(language)) {
+        return res.status(CONSTANTS.HTTP_STATUS.BAD_REQUEST).json({
+          success: false,
+          message: 'Invalid language'
+        });
+      }
+      user.language = language;
+    }
+
+    if (onboarded === true && !user.onboardedAt) {
+      user.onboardedAt = new Date();
     }
 
     if (theme !== undefined) {
