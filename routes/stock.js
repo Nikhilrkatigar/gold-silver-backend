@@ -214,7 +214,7 @@ router.get('/', async (req, res) => {
   } catch (error) {
     res.status(error.status || CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
       success: false,
-      message: error.message || 'Error fetching stock'
+      message: error.status ? error.message : 'Error fetching stock'
     });
   }
 });
@@ -267,7 +267,7 @@ router.post('/add', async (req, res) => {
     }
     res.status(error.status || CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
       success: false,
-      message: error.message || 'Error adding stock'
+      message: error.status ? error.message : 'Error adding stock'
     });
   } finally {
     if (session) {
@@ -323,7 +323,7 @@ router.post('/add-cash', async (req, res) => {
     }
     res.status(error.status || CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
       success: false,
-      message: error.message || 'Error adding cash'
+      message: error.status ? error.message : 'Error adding cash'
     });
   } finally {
     if (session) {
@@ -362,7 +362,7 @@ router.get('/history', async (req, res) => {
   } catch (error) {
     res.status(error.status || CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
       success: false,
-      message: error.message || 'Error fetching history'
+      message: error.status ? error.message : 'Error fetching history'
     });
   }
 });
@@ -411,7 +411,7 @@ router.post('/undo', async (req, res) => {
     }
     res.status(error.status || CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
       success: false,
-      message: error.message || 'Error undoing last stock input'
+      message: error.status ? error.message : 'Error undoing last stock input'
     });
   } finally {
     if (session) {

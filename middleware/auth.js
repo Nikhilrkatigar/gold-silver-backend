@@ -22,6 +22,13 @@ const auth = async (req, res, next) => {
       });
     }
 
+    if (user.passwordChangedAt && decoded.iat * 1000 < user.passwordChangedAt.getTime()) {
+      return res.status(401).json({
+        success: false,
+        message: 'Password was changed. Please log in again.'
+      });
+    }
+
     if (!user.isActive) {
       return res.status(403).json({
         success: false,

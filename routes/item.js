@@ -645,7 +645,7 @@ router.post('/:id/override', checkItemMode, async (req, res) => {
     console.error('Error applying item override:', error);
     return res.status(error.status || 500).json({
       success: false,
-      message: error.message || 'Error applying item override'
+      message: error.status ? error.message : 'Error applying item override'
     });
   } finally {
     if (session) {
@@ -794,7 +794,7 @@ router.post('/mark-sold/batch', checkItemMode, async (req, res) => {
     console.error('Error marking items as sold:', error);
     res.status(error.status || 500).json({
       success: false,
-      message: error.message || 'Error marking items as sold'
+      message: error.status ? error.message : 'Error marking items as sold'
     });
   } finally {
     if (session) {

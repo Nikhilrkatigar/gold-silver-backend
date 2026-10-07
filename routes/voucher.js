@@ -107,6 +107,13 @@ const applyStockAdjustmentForVoucher = async (userId, adjustment = {}, voucherTy
 const BILLING_TYPES = ['cash', 'credit'];
 const SETTLEMENT_TYPES = ['add_cash', 'add_gold', 'add_silver', 'money_to_gold', 'money_to_silver'];
 const ALLOWED_TYPES = [...BILLING_TYPES, ...SETTLEMENT_TYPES];
+const PURCHASE_TYPES = ['old_purchase', 'exchange', 'new_purchase'];
+
+const assertPurchaseType = (purchaseType) => {
+  if (purchaseType !== undefined && !PURCHASE_TYPES.includes(purchaseType)) {
+    throw badRequest('Invalid purchaseType');
+  }
+};
 
 const usesStockAdjustment = (paymentType) => BILLING_TYPES.includes(paymentType);
 
@@ -286,13 +293,15 @@ router.post('/', async (req, res) => {
       deliveryLocation,
       gstDetails,
       balanceSnapshot: incomingBalanceSnapshot,
-      voucherType = 'sale'   // 'sale' (default) or 'purchase' (old gold buy/exchange)
+      voucherType = 'sale',   // 'sale' (default) or 'purchase' (old gold buy/exchange)
+      purchaseType
     } = req.body;
 
     // Validate voucherType
     if (!['sale', 'purchase'].includes(voucherType)) {
       throw badRequest('Invalid voucherType. Must be sale or purchase');
     }
+    assertPurchaseType(purchaseType);
 
     const isSettlementType = SETTLEMENT_TYPES.includes(paymentType);
 
@@ -606,6 +615,7 @@ router.post('/', async (req, res) => {
       stockAdjusted,
       stockAdjustment,
       voucherType,
+      purchaseType: voucherType === 'purchase' ? purchaseType : undefined,
       stockRestored: false
     });
 
@@ -681,7 +691,7 @@ router.post('/', async (req, res) => {
     console.error('Create voucher error:', error);
     return res.status(error.status || 500).json({
       success: false,
-      message: error.message || 'Server error creating voucher'
+      message: error.status ? error.message : 'Server error creating voucher'
     });
   } finally {
     if (session) {
@@ -934,7 +944,8 @@ router.put('/:id', async (req, res) => {
       deliveryLocation,
       gstDetails,
       balanceSnapshot: incomingBalanceSnapshot,
-      voucherType = existingVoucher.voucherType || 'sale'
+      voucherType = existingVoucher.voucherType || 'sale',
+      purchaseType = existingVoucher.purchaseType
     } = req.body;
 
     const isSettlementType = SETTLEMENT_TYPES.includes(paymentType);
@@ -947,6 +958,7 @@ router.put('/:id', async (req, res) => {
     if (!['sale', 'purchase'].includes(voucherType)) {
       throw badRequest('Invalid voucherType. Must be sale or purchase');
     }
+    assertPurchaseType(purchaseType);
     if (!isSettlementType && (!Array.isArray(items) || items.length === 0)) {
       throw badRequest('At least one item is required for this payment type');
     }
@@ -1279,6 +1291,7 @@ router.put('/:id', async (req, res) => {
       stockAdjusted,
       stockAdjustment,
       voucherType,
+      purchaseType: voucherType === 'purchase' ? purchaseType : undefined,
       stockRestored: false,
       status: 'active',
       cancelledReason: undefined
@@ -1302,7 +1315,7 @@ router.put('/:id', async (req, res) => {
     console.error('Update voucher error:', error);
     return res.status(error.status || 500).json({
       success: false,
-      message: error.message || 'Server error updating voucher'
+      message: error.status ? error.message : 'Server error updating voucher'
     });
   } finally {
     if (session) {
@@ -1385,7 +1398,7 @@ router.patch('/:id', async (req, res) => {
     console.error('Cancel voucher error:', error);
     return res.status(error.status || 500).json({
       success: false,
-      message: error.message || 'Server error cancelling voucher'
+      message: error.status ? error.message : 'Server error cancelling voucher'
     });
   } finally {
     if (session) {
@@ -1465,7 +1478,7 @@ router.delete('/:id', async (req, res) => {
     console.error('Delete voucher error:', error);
     return res.status(error.status || 500).json({
       success: false,
-      message: error.message || 'Server error deleting voucher'
+      message: error.status ? error.message : 'Server error deleting voucher'
     });
   } finally {
     if (session) {

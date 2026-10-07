@@ -17,7 +17,12 @@ const seedAdmin = async () => {
     }
 
     const adminPhone = process.env.ADMIN_PHONE || '8904286980';
-    const adminPassword = process.env.ADMIN_PASSWORD || 'ChangeMe123!';
+    const adminPassword = process.env.ADMIN_PASSWORD;
+    if (!adminPassword || adminPassword.length < 8) {
+      console.error('Set ADMIN_PASSWORD (8+ characters) in .env before seeding the admin.');
+      await mongoose.disconnect();
+      process.exit(1);
+    }
     const adminShopName = process.env.ADMIN_SHOP_NAME || 'Admin';
 
     const admin = new User({

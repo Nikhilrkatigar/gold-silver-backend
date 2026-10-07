@@ -114,6 +114,8 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  // Tokens issued before this are rejected (set on password change)
+  passwordChangedAt: Date,
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
@@ -141,6 +143,8 @@ userSchema.pre('save', async function (next) {
   try {
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(this.password, salt);
+    // 1s back-dated so a token issued right after the change is still valid
+    if (!this.isNew) this.passwordChangedAt = new Date(Date.now() - 1000);
     next();
   } catch (error) {
     next(error);

@@ -289,6 +289,11 @@ const voucherSchema = new mongoose.Schema({
     default: 'sale',
     index: true
   },
+  // Purchase vouchers only: why the shop bought the metal
+  purchaseType: {
+    type: String,
+    enum: ['old_purchase', 'exchange', 'new_purchase']
+  },
   cancelledReason: {
     type: String,
     sparse: true

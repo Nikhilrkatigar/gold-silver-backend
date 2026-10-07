@@ -21,19 +21,6 @@ const validateLogin = [
     .withMessage('Password is required')
 ];
 
-const validateCreateAdmin = [
-  body('shopName').trim().isLength({ min: 2 }).withMessage('Shop name is required'),
-  body('phoneNumber')
-    .customSanitizer(sanitizePhone)
-    .matches(CONSTANTS.VALIDATION.PHONE_REGEX)
-    .withMessage(CONSTANTS.ERROR_MESSAGES.INVALID_PHONE),
-  body('password')
-    .isLength({ min: CONSTANTS.VALIDATION.PASSWORD_MIN_LENGTH })
-    .withMessage(`Password must be at least ${CONSTANTS.VALIDATION.PASSWORD_MIN_LENGTH} characters`)
-    .matches(CONSTANTS.VALIDATION.PASSWORD_REGEX)
-    .withMessage(CONSTANTS.ERROR_MESSAGES.INVALID_PASSWORD)
-];
-
 const handleValidationErrors = (req, res, next) => {
   const errors = validationResult(req);
   if (errors.isEmpty()) return next();
@@ -255,50 +242,6 @@ router.patch('/settings', auth, async (req, res) => {
     return res.status(CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
       success: false,
       message: 'Server error updating settings'
-    });
-  }
-});
-
-router.post('/create-admin', validateCreateAdmin, handleValidationErrors, async (req, res) => {
-  try {
-    const { shopName, password } = req.body;
-    const phoneNumber = sanitizePhone(req.body.phoneNumber);
-
-    const adminExists = await User.findOne({ role: 'admin' });
-    if (adminExists) {
-      return res.status(CONSTANTS.HTTP_STATUS.FORBIDDEN).json({
-        success: false,
-        message: 'Admin already exists'
-      });
-    }
-
-    const admin = new User({
-      shopName: shopName.trim(),
-      phoneNumber,
-      password,
-      role: 'admin',
-      licenseExpiryDate: new Date('2099-12-31'),
-      licenseDays: 999999
-    });
-
-    await admin.save();
-
-    return res.status(CONSTANTS.HTTP_STATUS.CREATED).json({
-      success: true,
-      message: 'Admin created successfully',
-      token: generateToken(admin._id),
-      user: {
-        id: admin._id,
-        shopName: admin.shopName,
-        phoneNumber: admin.phoneNumber,
-        role: admin.role
-      }
-    });
-  } catch (error) {
-    console.error('Create admin error:', error);
-    return res.status(CONSTANTS.HTTP_STATUS.INTERNAL_ERROR).json({
-      success: false,
-      message: 'Server error creating admin'
     });
   }
 });

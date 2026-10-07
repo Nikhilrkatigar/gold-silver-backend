@@ -199,7 +199,7 @@ router.post('/', async (req, res) => {
     console.error('Create settlement error:', error);
     return res.status(error.status || 500).json({
       success: false,
-      message: error.message || 'Server error creating settlement'
+      message: error.status ? error.message : 'Server error creating settlement'
     });
   }
 });
@@ -330,7 +330,7 @@ router.delete('/:id', async (req, res) => {
     console.error('Delete settlement error:', error);
     return res.status(error.status || 500).json({
       success: false,
-      message: error.message || 'Server error deleting settlement'
+      message: error.status ? error.message : 'Server error deleting settlement'
     });
   }
 });

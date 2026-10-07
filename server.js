@@ -109,12 +109,17 @@ app.use('/uploads', (req, res, next) => {
   if (!token) {
     return res.status(401).json({ success: false, message: 'Authentication required' });
   }
+  let decoded;
   try {
-    jwt.verify(token, process.env.JWT_SECRET);
-    next();
+    decoded = jwt.verify(token, process.env.JWT_SECRET);
   } catch {
     return res.status(401).json({ success: false, message: 'Invalid token' });
   }
+  // QR codes live under /qrcodes/<userId>/ — only that shop may read them
+  if (!req.path.startsWith(`/qrcodes/${decoded.userId}/`)) {
+    return res.status(403).json({ success: false, message: 'Access denied' });
+  }
+  next();
 }, express.static(path.join(__dirname, 'uploads')));
 
 app.get('/api/health', (req, res) => {
