@@ -13,6 +13,7 @@ const {
   getReversalWindowHours, canReverse, canReverseWithWindow,
   calculateUnifiedAmount, parsePagination, paginationMeta
 } = require('../utils/helpers');
+const { applyVoucherToBalances, reverseVoucherOnBalances } = require('../utils/voucherBalance');
 
 const sanitizeBalanceSnapshot = (incomingSnapshot, fallbackSnapshot) => ({
   oldBalance: {
@@ -197,13 +198,12 @@ const reverseVoucherEffects = async (voucher, ledger, options = {}) => {
     }
   }
 
-  // If voucher has previousLedgerState saved, use it to restore the exact previous state
+  // Remove exactly this voucher's effect; later vouchers on the ledger stay intact
   if (voucher.previousLedgerState) {
-    ledger.balances.goldFineWeight = toNumber(voucher.previousLedgerState.goldFineWeight);
-    ledger.balances.silverFineWeight = toNumber(voucher.previousLedgerState.silverFineWeight);
-    ledger.balances.amount = toNumber(voucher.previousLedgerState.amount);
-    ledger.balances.cashBalance = toNumber(voucher.previousLedgerState.cashBalance);
-    ledger.balances.creditBalance = toNumber(voucher.previousLedgerState.creditBalance);
+    ledger.set('balances', {
+      ...(ledger.balances?.toObject?.() || ledger.balances),
+      ...reverseVoucherOnBalances(ledger.balances, voucher, ledger.ledgerType)
+    });
     return;
   }
 
@@ -619,52 +619,11 @@ router.post('/', async (req, res) => {
       stockRestored: false
     });
 
-    // Skip balance updates for GST invoices or GST-type ledgers
-    if (invoiceType !== 'gst' && ledger.ledgerType !== 'gst') {
-      if (paymentType === 'credit') {
-        cleanedItems.forEach((item) => {
-          if (item.metalType === 'gold') {
-            if (voucherType === 'purchase') {
-              // Purchase: shop received gold from customer → store's gold increased, customer's owed fine DECREASES
-              ledger.balances.goldFineWeight -= toNumber(item.fineWeight);
-            } else {
-              // Sale: customer owes us gold fine
-              ledger.balances.goldFineWeight += toNumber(item.fineWeight);
-            }
-          } else if (item.metalType === 'silver') {
-            if (voucherType === 'purchase') {
-              ledger.balances.silverFineWeight -= toNumber(item.fineWeight);
-            } else {
-              ledger.balances.silverFineWeight += toNumber(item.fineWeight);
-            }
-          }
-        });
-        // Credit bills update cashBalance
-        ledger.balances.cashBalance = currentBalance.amount;
-      } else if (paymentType === 'cash') {
-        ledger.balances.cashBalance = currentBalance.amount;
-      } else if (paymentType === 'add_cash') {
-        // For add_cash, determine which balance to update based on which one is being used
-        if (toNumber(ledger.balances.cashBalance) !== 0 || toNumber(ledger.balances.creditBalance) === 0) {
-          ledger.balances.cashBalance = currentBalance.amount;
-        } else {
-          ledger.balances.creditBalance = currentBalance.amount;
-        }
-      } else if (paymentType === 'add_gold') {
-        // Customer gives gold to settle debt - reduces gold owed
-        ledger.balances.goldFineWeight -= toNumber(cashReceived);
-      } else if (paymentType === 'add_silver') {
-        // Customer gives silver to settle debt - reduces silver owed
-        ledger.balances.silverFineWeight -= toNumber(cashReceived);
-      } else if (paymentType === 'money_to_gold') {
-        // Customer pays cash to settle gold fine debt - reduces gold owed
-        ledger.balances.goldFineWeight -= (toNumber(cashReceived) / (toNumber(goldRate) || 1));
-      } else if (paymentType === 'money_to_silver') {
-        // Customer pays cash to settle silver fine debt - reduces silver owed
-        ledger.balances.silverFineWeight -= (toNumber(cashReceived) / (toNumber(silverRate) || 1));
-      }
-      ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
-    }
+    // GST invoices / GST ledgers are left unchanged inside applyVoucherToBalances
+    ledger.set('balances', {
+      ...(ledger.balances?.toObject?.() || ledger.balances),
+      ...applyVoucherToBalances(ledger.balances, voucher, ledger.ledgerType)
+    });
 
     ledger.hasVouchers = true;
     await ledger.save({ session });
@@ -1189,43 +1148,13 @@ router.put('/:id', async (req, res) => {
       creditBalance: toNumber(targetLedger.balances.creditBalance)
     };
 
-    if (invoiceType !== 'gst' && targetLedger.ledgerType !== 'gst') {
-      if (paymentType === 'credit') {
-        cleanedItems.forEach((item) => {
-          if (item.metalType === 'gold') {
-            if (voucherType === 'purchase') {
-              targetLedger.balances.goldFineWeight -= toNumber(item.fineWeight);
-            } else {
-              targetLedger.balances.goldFineWeight += toNumber(item.fineWeight);
-            }
-          } else if (item.metalType === 'silver') {
-            if (voucherType === 'purchase') {
-              targetLedger.balances.silverFineWeight -= toNumber(item.fineWeight);
-            } else {
-              targetLedger.balances.silverFineWeight += toNumber(item.fineWeight);
-            }
-          }
-        });
-        targetLedger.balances.cashBalance = currentBalance.amount;
-      } else if (paymentType === 'cash') {
-        targetLedger.balances.cashBalance = currentBalance.amount;
-      } else if (paymentType === 'add_cash') {
-        if (toNumber(targetLedger.balances.cashBalance) !== 0 || toNumber(targetLedger.balances.creditBalance) === 0) {
-          targetLedger.balances.cashBalance = currentBalance.amount;
-        } else {
-          targetLedger.balances.creditBalance = currentBalance.amount;
-        }
-      } else if (paymentType === 'add_gold') {
-        targetLedger.balances.goldFineWeight -= toNumber(cashReceived);
-      } else if (paymentType === 'add_silver') {
-        targetLedger.balances.silverFineWeight -= toNumber(cashReceived);
-      } else if (paymentType === 'money_to_gold') {
-        targetLedger.balances.goldFineWeight -= (toNumber(cashReceived) / (toNumber(goldRate) || 1));
-      } else if (paymentType === 'money_to_silver') {
-        targetLedger.balances.silverFineWeight -= (toNumber(cashReceived) / (toNumber(silverRate) || 1));
-      }
-      targetLedger.balances.amount = calculateUnifiedAmount(targetLedger.balances);
-    }
+    targetLedger.set('balances', {
+      ...(targetLedger.balances?.toObject?.() || targetLedger.balances),
+      ...applyVoucherToBalances(targetLedger.balances, {
+        paymentType, voucherType, invoiceType, items: cleanedItems,
+        total, cashReceived, goldRate, silverRate
+      }, targetLedger.ledgerType)
+    });
 
     targetLedger.hasVouchers = true;
 
