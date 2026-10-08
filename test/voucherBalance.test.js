@@ -54,3 +54,25 @@ test('GST invoices and GST ledgers do not change balances', () => {
   assert.strictEqual(applyVoucherToBalances(zero, { ...v, invoiceType: 'gst' }, 'regular').cashBalance, 0);
   assert.strictEqual(applyVoucherToBalances(zero, v, 'gst').cashBalance, 0);
 });
+
+const { snapshotFromBalances, applySettlementToBalances, settlementEffect } = require('../utils/voucherBalance');
+
+test('printed snapshot comes from real before/after balances (Kunal #173: 15g silver received)', () => {
+  const before = { goldFineWeight: 0, silverFineWeight: 38.58, cashBalance: 1150, creditBalance: 0 };
+  const after = applyVoucherToBalances(before, { paymentType: 'add_silver', cashReceived: 15 }, 'regular');
+  const snap = snapshotFromBalances(before, after);
+  assert.strictEqual(snap.oldBalance.silverFineWeight, 38.58);
+  assert.strictEqual(snap.currentBalance.silverFineWeight, 23.58);
+  assert.strictEqual(snap.currentBalance.amount, 1150);
+});
+
+test('settlements reverse exactly, including money conversions saved without the flag', () => {
+  const start = { goldFineWeight: 4, silverFineWeight: 0, cashBalance: 0, creditBalance: 9000 };
+  const legacyConversion = { metalType: 'gold', direction: 'payment', fineGiven: 1, amount: 6000, balanceBefore: 4, balanceAfter: { fineWeight: 5, amount: 3000 } };
+  assert.deepStrictEqual(settlementEffect(legacyConversion), { fineSign: 1, amountSign: -1 });
+
+  for (const s of [legacyConversion, { metalType: 'gold', direction: 'payment', fineGiven: 1, amount: 6000 }, { metalType: 'silver', direction: 'receipt', fineGiven: 10, amount: 900 }]) {
+    const after = applySettlementToBalances(start, s);
+    assert.deepStrictEqual(applySettlementToBalances(after, s, -1), applySettlementToBalances(start, {}, 0));
+  }
+});

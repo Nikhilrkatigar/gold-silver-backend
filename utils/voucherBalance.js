@@ -81,4 +81,59 @@ const reverseVoucherOnBalances = (current, voucher, ledgerType) => {
   return normalize(now);
 };
 
-module.exports = { applyVoucherToBalances, reverseVoucherOnBalances, BALANCE_KEYS };
+/**
+ * Printed old/current balance for a voucher, from the ledger balances before
+ * and after it. Always computed on the server so a stale page can't print
+ * a wrong balance.
+ */
+const snapshotFromBalances = (before, after) => {
+  const b = normalize(before);
+  const a = normalize(after);
+  return {
+    oldBalance: {
+      creditAmount: b.creditBalance,
+      cashAmount: b.cashBalance,
+      totalAmount: b.amount,
+      goldFineWeight: b.goldFineWeight,
+      silverFineWeight: b.silverFineWeight
+    },
+    currentBalance: { amount: a.amount, goldFineWeight: a.goldFineWeight, silverFineWeight: a.silverFineWeight }
+  };
+};
+
+/**
+ * Signs a legacy Settlement applies: fine += fineSign * fineGiven, creditBalance += amountSign * amount.
+ * Money conversions always add fine and deduct amount, whatever `direction` says.
+ * Old records have no isMoneyConversion flag, so it is inferred from the saved balanceAfter.
+ */
+const isMoneyConversionSettlement = (s) => {
+  if (typeof s.isMoneyConversion === 'boolean') return s.isMoneyConversion;
+  const fine = toNumber(s.fineGiven);
+  if (s.direction === 'receipt' || !fine || !s.balanceAfter) return false;
+  return Math.abs(toNumber(s.balanceBefore) + fine - toNumber(s.balanceAfter.fineWeight)) < 0.0005;
+};
+
+const settlementEffect = (s) => {
+  if (isMoneyConversionSettlement(s)) return { fineSign: 1, amountSign: -1 };
+  const sign = s.direction === 'receipt' ? 1 : -1;
+  return { fineSign: sign, amountSign: sign };
+};
+
+const applySettlementToBalances = (balances, s, direction = 1) => {
+  const b = normalize(balances);
+  const { fineSign, amountSign } = settlementEffect(s);
+  const key = s.metalType === 'gold' ? 'goldFineWeight' : 'silverFineWeight';
+  b[key] += direction * fineSign * toNumber(s.fineGiven);
+  b.creditBalance += direction * amountSign * toNumber(s.amount);
+  return normalize(b);
+};
+
+module.exports = {
+  applyVoucherToBalances,
+  reverseVoucherOnBalances,
+  snapshotFromBalances,
+  settlementEffect,
+  applySettlementToBalances,
+  normalize,
+  BALANCE_KEYS
+};

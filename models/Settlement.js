@@ -55,6 +55,11 @@ const settlementSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  // Cash converted to fine: always adds fine and deducts amount, whatever direction says
+  isMoneyConversion: {
+    type: Boolean,
+    default: false
+  },
   direction: {
     type: String,
     enum: ['receipt', 'payment'],

@@ -6,6 +6,7 @@ const Settlement = require('../models/Settlement');
 const { addBackToStock, deductFromStock } = require('./stock');
 const { auth, checkLicense, isAdmin } = require('../middleware/auth');
 const { toNumber, sanitizePhone, calculateUnifiedAmount, parsePagination, paginationMeta } = require('../utils/helpers');
+const { applyVoucherToBalances, applySettlementToBalances, settlementEffect } = require('../utils/voucherBalance');
 
 
 const resetBalances = () => ({
@@ -364,20 +365,27 @@ router.patch('/:id', async (req, res) => {
       };
     }
 
+    const [voucherCount, settlementCount] = await Promise.all([
+      Voucher.countDocuments({ userId: req.userId, ledgerId: req.params.id }),
+      Settlement.countDocuments({ userId: req.userId, ledgerId: req.params.id })
+    ]);
+    const hasEntries = voucherCount > 0 || settlementCount > 0;
+
+    // Regular and GST ledgers keep balances differently; switching after entries would scramble the balance
+    if (hasEntries && updates.ledgerType && updates.ledgerType !== (existingLedger.ledgerType || 'regular')) {
+      return res.status(400).json({
+        success: false,
+        message: 'This customer already has entries, so the ledger type cannot be changed. Create a new customer with the other type instead.'
+      });
+    }
+
     const ledger = await Ledger.findOneAndUpdate(
       { _id: req.params.id, userId: req.userId },
       updates,
       { new: true, runValidators: true }
     );
 
-    // If opening balance was updated and there are no transactions yet,
-    // keep current balances aligned with the new opening values.
-    const [voucherCount, settlementCount] = await Promise.all([
-      Voucher.countDocuments({ userId: req.userId, ledgerId: req.params.id }),
-      Settlement.countDocuments({ userId: req.userId, ledgerId: req.params.id })
-    ]);
-
-    if (voucherCount === 0 && settlementCount === 0) {
+    if (!hasEntries) {
       const nextLedgerType = updates.ledgerType || existingLedger.ledgerType;
       const previousOpeningBalance = existingLedger.openingBalance || {};
       const nextOpeningBalance = updates.openingBalance || previousOpeningBalance;
@@ -408,8 +416,19 @@ router.patch('/:id', async (req, res) => {
       }
 
       await ledger.save();
+    } else if (ledger.ledgerType !== 'gst' && updates.openingBalance !== undefined) {
+      // Entries exist: shift the current balance by exactly the change in opening balance,
+      // so the balance always equals opening balance + entries.
+      const prev = existingLedger.openingBalance || {};
+      const next = updates.openingBalance;
+      await syncOpeningBalanceStock(req.userId, prev, next);
+      const b = ledger.balances;
+      b.goldFineWeight = toNumber(b.goldFineWeight) + toNumber(next.goldFineWeight) - toNumber(prev.goldFineWeight);
+      b.silverFineWeight = toNumber(b.silverFineWeight) + toNumber(next.silverFineWeight) - toNumber(prev.silverFineWeight);
+      b.cashBalance = toNumber(b.cashBalance) + toNumber(next.amount) - toNumber(prev.amount);
+      b.amount = calculateUnifiedAmount(b);
+      await ledger.save();
     }
-
     return res.json({
       success: true,
       message: 'Ledger updated successfully',
@@ -483,12 +502,42 @@ router.delete('/:id/vouchers', async (req, res) => {
       });
     }
 
+    // Undo the stock these entries moved, so stock stays equal to what is physically in the shop
+    const [vouchers, settlements] = await Promise.all([
+      Voucher.find({ userId: req.userId, ledgerId: req.params.id, status: 'active', stockRestored: { $ne: true } })
+        .select('paymentType voucherType stockAdjustment').lean(),
+      Settlement.find({ userId: req.userId, ledgerId: req.params.id }).lean()
+    ]);
+    let gold = 0;
+    let silver = 0;
+    for (const v of vouchers) {
+      // Purchases added stock when saved; sales and metal received are reversed the other way
+      const sign = v.voucherType === 'purchase' && ['cash', 'credit'].includes(v.paymentType) ? -1 : 1;
+      gold += sign * toNumber(v.stockAdjustment?.gold);
+      silver += sign * toNumber(v.stockAdjustment?.silver);
+    }
+    for (const st of settlements) {
+      const back = -settlementEffect(st).fineSign * toNumber(st.fineGiven);
+      if (st.metalType === 'gold') gold += back; else silver += back;
+    }
+    // Deduct first: if stock is short this fails before anything is deleted
+    await deductFromStock(req.userId, Math.max(0, -gold), Math.max(0, -silver));
+    await addBackToStock(req.userId, Math.max(0, gold), Math.max(0, silver));
+
     await Promise.all([
       Voucher.deleteMany({ userId: req.userId, ledgerId: req.params.id }),
       Settlement.deleteMany({ userId: req.userId, ledgerId: req.params.id })
     ]);
 
-    ledger.balances = resetBalances();
+    // With no entries left, the balance is exactly the opening balance
+    const ob = ledger.openingBalance || {};
+    ledger.balances = ledger.ledgerType === 'gst' ? resetBalances() : {
+      ...resetBalances(),
+      goldFineWeight: toNumber(ob.goldFineWeight),
+      silverFineWeight: toNumber(ob.silverFineWeight),
+      cashBalance: toNumber(ob.amount),
+      amount: toNumber(ob.amount)
+    };
     ledger.hasVouchers = false;
     await ledger.save();
 
@@ -498,9 +547,9 @@ router.delete('/:id/vouchers', async (req, res) => {
     });
   } catch (error) {
     console.error('Delete vouchers error:', error);
-    return res.status(500).json({
+    return res.status(error.status || 500).json({
       success: false,
-      message: 'Server error deleting vouchers'
+      message: error.status ? error.message : 'Server error deleting vouchers'
     });
   }
 });
@@ -559,72 +608,21 @@ router.post('/:id/recalculate-balance', async (req, res) => {
       });
     }
 
-    // Start from opening balance instead of zero
+    // Replay opening balance + every entry in the order it was saved, using the same rules as saving
     const ob = ledger.openingBalance || {};
-    ledger.balances = {
+    let balances = {
       ...resetBalances(),
       goldFineWeight: toNumber(ob.goldFineWeight),
       silverFineWeight: toNumber(ob.silverFineWeight),
       cashBalance: toNumber(ob.amount)
     };
+    const entries = [
+      ...vouchers.map((v) => ({ at: v.createdAt, apply: (bal) => applyVoucherToBalances(bal, v, ledger.ledgerType) })),
+      ...settlements.map((st) => ({ at: st.createdAt, apply: (bal) => applySettlementToBalances(bal, st) }))
+    ].sort((x, y) => new Date(x.at) - new Date(y.at));
+    for (const entry of entries) balances = entry.apply(balances);
 
-    vouchers.forEach((voucher) => {
-      // Skip GST invoices as they don't affect regular balance
-      if (voucher.invoiceType === 'gst') return;
-
-      if (voucher.paymentType === 'credit') {
-        voucher.items?.forEach((item) => {
-          if (item.metalType === 'gold') {
-            ledger.balances.goldFineWeight += toNumber(item.fineWeight);
-          } else if (item.metalType === 'silver') {
-            ledger.balances.silverFineWeight += toNumber(item.fineWeight);
-          }
-        });
-        // Credit bills use cashBalance, not creditBalance
-        ledger.balances.cashBalance += toNumber(voucher.total);
-      } else if (voucher.paymentType === 'cash') {
-        // Signed delta: negative means customer overpaid (credit with us).
-        const balanceDelta = toNumber(voucher.total) - toNumber(voucher.cashReceived);
-        ledger.balances.cashBalance += balanceDelta;
-      } else if (voucher.paymentType === 'add_cash') {
-        // Settlement: Add cash to balance
-        const amountToAdd = toNumber(voucher.cashReceived);
-        ledger.balances.cashBalance -= amountToAdd;
-      } else if (voucher.paymentType === 'add_gold') {
-        // Settlement: Customer gives gold to settle debt - reduces gold owed
-        ledger.balances.goldFineWeight -= toNumber(voucher.cashReceived);
-      } else if (voucher.paymentType === 'add_silver') {
-        // Settlement: Customer gives silver to settle debt - reduces silver owed
-        ledger.balances.silverFineWeight -= toNumber(voucher.cashReceived);
-      } else if (voucher.paymentType === 'money_to_gold') {
-        // Settlement: Customer pays cash to settle gold fine debt
-        const amountPaid = toNumber(voucher.cashReceived);
-        const goldRate = toNumber(voucher.goldRate) || 1;
-        ledger.balances.goldFineWeight -= (amountPaid / goldRate);
-      } else if (voucher.paymentType === 'money_to_silver') {
-        // Settlement: Customer pays cash to settle silver fine debt
-        const amountPaid = toNumber(voucher.cashReceived);
-        const silverRate = toNumber(voucher.silverRate) || 1;
-        ledger.balances.silverFineWeight -= (amountPaid / silverRate);
-      }
-    });
-
-    settlements.forEach((settlement) => {
-      const fine = toNumber(settlement.fineGiven);
-      const amount = toNumber(settlement.amount);
-      const direction = settlement.direction || 'payment';
-      const multiplier = direction === 'receipt' ? 1 : -1;
-
-      if (settlement.metalType === 'gold') {
-        ledger.balances.goldFineWeight += multiplier * fine;
-      } else if (settlement.metalType === 'silver') {
-        ledger.balances.silverFineWeight += multiplier * fine;
-      }
-
-      ledger.balances.creditBalance += multiplier * amount;
-    });
-
-    ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
+    ledger.balances = balances;
     ledger.hasVouchers = vouchers.length > 0;
 
     await ledger.save();

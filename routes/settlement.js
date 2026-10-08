@@ -6,6 +6,7 @@ const { auth, checkLicense } = require('../middleware/auth');
 const { deductFromStock, addBackToStock } = require('./stock');
 const CONSTANTS = require('../utils/constants');
 const { toNumber, canReverse, canReverseWithWindow, getReversalWindowHours, calculateUnifiedAmount } = require('../utils/helpers');
+const { applySettlementToBalances, settlementEffect } = require('../utils/voucherBalance');
 
 // user-aware reversal helper
 const canReverseForSettlement = (settlement, user) => {
@@ -160,6 +161,7 @@ router.post('/', async (req, res) => {
       fineGiven,
       amount,
       direction,
+      isMoneyConversion: Boolean(isMoneyConversion),
       balanceAfter: {
         amount: updatedCredit,
         fineWeight: updatedFine
@@ -291,33 +293,22 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
-    const ledger = await Ledger.findById(settlement.ledgerId);
-    if (ledger) {
-      const fineMultiplier = settlement.direction === 'receipt' ? -1 : 1;
-      const amountMultiplier = settlement.direction === 'receipt' ? -1 : 1;
-
-      if (settlement.metalType === 'gold') {
-        ledger.balances.goldFineWeight += fineMultiplier * toNumber(settlement.fineGiven);
-      } else {
-        ledger.balances.silverFineWeight += fineMultiplier * toNumber(settlement.fineGiven);
-      }
-      ledger.balances.creditBalance += amountMultiplier * toNumber(settlement.amount);
-      ledger.balances.amount = calculateUnifiedAmount(ledger.balances);
-      await ledger.save();
+    // Stock first: if it is short, nothing else has changed yet
+    const metal = (w) => [settlement.metalType === 'gold' ? w : 0, settlement.metalType === 'silver' ? w : 0];
+    if (settlementEffect(settlement).fineSign < 0) {
+      await addBackToStock(req.userId, ...metal(settlement.fineGiven));
+    } else {
+      await deductFromStock(req.userId, ...metal(settlement.fineGiven));
     }
 
-    if (settlement.direction === 'payment') {
-      await addBackToStock(
-        req.userId,
-        settlement.metalType === 'gold' ? settlement.fineGiven : 0,
-        settlement.metalType === 'silver' ? settlement.fineGiven : 0
-      );
-    } else {
-      await deductFromStock(
-        req.userId,
-        settlement.metalType === 'gold' ? settlement.fineGiven : 0,
-        settlement.metalType === 'silver' ? settlement.fineGiven : 0
-      );
+    const ledger = await Ledger.findById(settlement.ledgerId);
+    if (ledger) {
+      // Undo with the same signs the settlement was saved with (money conversions differ from direction)
+      ledger.set('balances', {
+        ...(ledger.balances?.toObject?.() || ledger.balances),
+        ...applySettlementToBalances(ledger.balances, settlement, -1)
+      });
+      await ledger.save();
     }
 
     await Settlement.findByIdAndDelete(req.params.id);

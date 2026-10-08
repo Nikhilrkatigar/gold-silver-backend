@@ -8,27 +8,12 @@ const { auth, checkLicense } = require('../middleware/auth');
 const { deductFromStock, addBackToStock } = require('./stock');
 const CONSTANTS = require('../utils/constants');
 const {
-  toNumber, pickNumber, badRequest, notFound,
+  toNumber, badRequest, notFound, createError,
   supportsTransactions, startOptionalSession,
   getReversalWindowHours, canReverse, canReverseWithWindow,
   calculateUnifiedAmount, parsePagination, paginationMeta
 } = require('../utils/helpers');
-const { applyVoucherToBalances, reverseVoucherOnBalances } = require('../utils/voucherBalance');
-
-const sanitizeBalanceSnapshot = (incomingSnapshot, fallbackSnapshot) => ({
-  oldBalance: {
-    creditAmount: pickNumber(incomingSnapshot?.oldBalance?.creditAmount, fallbackSnapshot.oldBalance.creditAmount),
-    cashAmount: pickNumber(incomingSnapshot?.oldBalance?.cashAmount, fallbackSnapshot.oldBalance.cashAmount),
-    totalAmount: pickNumber(incomingSnapshot?.oldBalance?.totalAmount, fallbackSnapshot.oldBalance.totalAmount),
-    goldFineWeight: pickNumber(incomingSnapshot?.oldBalance?.goldFineWeight, fallbackSnapshot.oldBalance.goldFineWeight),
-    silverFineWeight: pickNumber(incomingSnapshot?.oldBalance?.silverFineWeight, fallbackSnapshot.oldBalance.silverFineWeight)
-  },
-  currentBalance: {
-    amount: pickNumber(incomingSnapshot?.currentBalance?.amount, fallbackSnapshot.currentBalance.amount),
-    goldFineWeight: pickNumber(incomingSnapshot?.currentBalance?.goldFineWeight, fallbackSnapshot.currentBalance.goldFineWeight),
-    silverFineWeight: pickNumber(incomingSnapshot?.currentBalance?.silverFineWeight, fallbackSnapshot.currentBalance.silverFineWeight)
-  }
-});
+const { applyVoucherToBalances, reverseVoucherOnBalances, snapshotFromBalances } = require('../utils/voucherBalance');
 
 const calculateGSTBreakdown = (taxableAmount, gstRate, gstType) => {
   const rate = toNumber(gstRate);
@@ -116,6 +101,33 @@ const assertPurchaseType = (purchaseType) => {
   }
 };
 
+// Cash-to-metal needs a rate, otherwise rupees would be counted as grams
+const assertSettlementRate = (paymentType, goldRate, silverRate) => {
+  if (paymentType === 'money_to_gold' && toNumber(goldRate) <= 0) {
+    throw badRequest('Enter the gold rate to convert cash into gold');
+  }
+  if (paymentType === 'money_to_silver' && toNumber(silverRate) <= 0) {
+    throw badRequest('Enter the silver rate to convert cash into silver');
+  }
+};
+
+// Same customer + same amount within this window is treated as a double tap
+const DUPLICATE_WINDOW_MS = 2 * 60 * 1000;
+
+const reversalWindowFor = (user) => (
+  user?.reversalSettings
+    ? (user.reversalSettings.enabled === false ? 0 : (user.reversalSettings.windowHours ?? getReversalWindowHours()))
+    : getReversalWindowHours()
+);
+
+// Entries past the reversal window are part of the customer's balance; guide the user to a correcting entry
+const lockedEntryError = (user, action) => {
+  const hours = reversalWindowFor(user);
+  return badRequest(hours > 0
+    ? `This entry is older than ${hours} hours, so it can't be ${action}. It is already part of the customer's balance. To fix a mistake, add a new correcting entry for the difference.`
+    : `Changing old entries is turned off for this shop. To fix a mistake, add a new correcting entry for the difference.`);
+};
+
 const usesStockAdjustment = (paymentType) => BILLING_TYPES.includes(paymentType);
 
 const getSettlementStockAdjustment = (paymentType, cashReceived) => {
@@ -145,19 +157,7 @@ const getStockAdjustmentVoucherType = (voucher) => (
 );
 
 // Determine reversal permission based on user-specific window or global default
-const canReverseForVoucher = (voucher, user) => {
-  let windowHours;
-  if (user?.reversalSettings) {
-    if (user.reversalSettings.enabled === false) {
-      windowHours = 0;
-    } else {
-      windowHours = user.reversalSettings.windowHours ?? getReversalWindowHours();
-    }
-  } else {
-    windowHours = getReversalWindowHours();
-  }
-  return canReverseWithWindow(voucher?.createdAt, windowHours);
-};
+const canReverseForVoucher = (voucher, user) => canReverseWithWindow(voucher?.createdAt, reversalWindowFor(user));
 
 const getVoucherStockAdjustment = (voucher) => {
   const explicitGold = toNumber(voucher?.stockAdjustment?.gold, null);
@@ -292,7 +292,6 @@ router.post('/', async (req, res) => {
       transportId,
       deliveryLocation,
       gstDetails,
-      balanceSnapshot: incomingBalanceSnapshot,
       voucherType = 'sale',   // 'sale' (default) or 'purchase' (old gold buy/exchange)
       purchaseType
     } = req.body;
@@ -302,6 +301,7 @@ router.post('/', async (req, res) => {
       throw badRequest('Invalid voucherType. Must be sale or purchase');
     }
     assertPurchaseType(purchaseType);
+    assertSettlementRate(paymentType, goldRate, silverRate);
 
     const isSettlementType = SETTLEMENT_TYPES.includes(paymentType);
 
@@ -482,6 +482,21 @@ router.post('/', async (req, res) => {
       currentBalance.amount = oldBalance.amount - total; // Subtract cash, add fine below
     }
 
+    if (!req.body.confirmDuplicate) {
+      const recentSame = await Voucher.findOne({
+        userId: req.userId,
+        ledgerId,
+        paymentType,
+        total,
+        cashReceived: toNumber(cashReceived),
+        status: 'active',
+        createdAt: { $gte: new Date(Date.now() - DUPLICATE_WINDOW_MS) }
+      }).session(session);
+      if (recentSame) {
+        throw createError(409, `This looks like a double entry: voucher #${recentSame.voucherNumber} for ${ledger.name} with the same amount was saved moments ago.`, 'DUPLICATE_ENTRY');
+      }
+    }
+
     let stockAdjustment = { gold: 0, silver: 0 };
     // Only adjust bulk stock if user is NOT in item mode
     if (user.stockMode !== 'item') {
@@ -497,63 +512,12 @@ router.post('/', async (req, res) => {
     }
 
     const stockAdjusted = hasNonZeroStockAdjustment(stockAdjustment);
-    const oldCreditAmount = toNumber(ledger.balances.creditBalance);
-    const oldCashAmount = toNumber(ledger.balances.cashBalance);
-    const oldGoldFineWeight = toNumber(ledger.balances.goldFineWeight);
-    const oldSilverFineWeight = toNumber(ledger.balances.silverFineWeight);
-
-    let currentGoldFineWeight = oldGoldFineWeight;
-    let currentSilverFineWeight = oldSilverFineWeight;
-
-    if (paymentType === 'credit') {
-      if (voucherType === 'purchase') {
-        // Purchase on credit: customer gives us fine metal → reduces what they're owed
-        // (from shop's perspective: shop received metal, not the other way)
-        cleanedItems.forEach((item) => {
-          if (item.metalType === 'gold') currentGoldFineWeight -= toNumber(item.fineWeight);
-          else if (item.metalType === 'silver') currentSilverFineWeight -= toNumber(item.fineWeight);
-        });
-      } else {
-        // Sale on credit: customer owes us fine metal
-        currentGoldFineWeight += stockAdjustment.gold;
-        currentSilverFineWeight += stockAdjustment.silver;
-      }
-    } else if (paymentType === 'add_gold') {
-      currentGoldFineWeight -= toNumber(cashReceived);
-    } else if (paymentType === 'add_silver') {
-      currentSilverFineWeight -= toNumber(cashReceived);
-    } else if (paymentType === 'money_to_gold') {
-      currentGoldFineWeight -= (toNumber(cashReceived) / (toNumber(goldRate) || 1));
-    } else if (paymentType === 'money_to_silver') {
-      currentSilverFineWeight -= (toNumber(cashReceived) / (toNumber(silverRate) || 1));
-    }
-
-    const fallbackCurrentAmount = paymentType === 'credit'
-      ? (voucherType === 'purchase'
-        ? (oldCreditAmount + oldCashAmount - total)
-        : (oldCreditAmount + oldCashAmount + total))
-      : paymentType === 'cash'
-        ? (voucherType === 'purchase'
-          ? (oldCashAmount - (toNumber(total) - toNumber(cashReceived)))
-          : (oldCashAmount + getCashBalanceDelta(total, cashReceived)))
-        : currentBalance.amount;
-
-    const fallbackBalanceSnapshot = {
-      oldBalance: {
-        creditAmount: oldCreditAmount,
-        cashAmount: oldCashAmount,
-        totalAmount: oldCreditAmount + oldCashAmount,
-        goldFineWeight: oldGoldFineWeight,
-        silverFineWeight: oldSilverFineWeight
-      },
-      currentBalance: {
-        amount: fallbackCurrentAmount,
-        goldFineWeight: currentGoldFineWeight,
-        silverFineWeight: currentSilverFineWeight
-      }
-    };
-
-    const balanceSnapshot = sanitizeBalanceSnapshot(incomingBalanceSnapshot, fallbackBalanceSnapshot);
+    // Printed old/current balance is always worked out here, never taken from the client
+    const nextBalances = applyVoucherToBalances(ledger.balances, {
+      paymentType, voucherType, invoiceType, items: cleanedItems,
+      total, cashReceived, goldRate, silverRate
+    }, ledger.ledgerType);
+    const balanceSnapshot = snapshotFromBalances(ledger.balances, nextBalances);
 
     const previousLedgerState = {
       goldFineWeight: toNumber(ledger.balances.goldFineWeight),
@@ -650,7 +614,8 @@ router.post('/', async (req, res) => {
     console.error('Create voucher error:', error);
     return res.status(error.status || 500).json({
       success: false,
-      message: error.status ? error.message : 'Server error creating voucher'
+      message: error.status ? error.message : 'Server error creating voucher',
+      code: error.code
     });
   } finally {
     if (session) {
@@ -850,13 +815,7 @@ router.put('/:id', async (req, res) => {
     // load current user's reversal policy
     const currentUser = await User.findById(req.userId).select('reversalSettings');
     if (!canReverseForVoucher(existingVoucher, currentUser)) {
-      // when policy is disabled windowHours will be 0, show a generic message
-      const window = currentUser?.reversalSettings
-        ? (currentUser.reversalSettings.enabled === false
-            ? 0
-            : (currentUser.reversalSettings.windowHours ?? getReversalWindowHours()))
-        : getReversalWindowHours();
-      throw badRequest(`Voucher cannot be edited after ${window} hours`);
+      throw lockedEntryError(currentUser, 'edited');
     }
 
     const previousLedger = await Ledger.findOne({
@@ -902,7 +861,6 @@ router.put('/:id', async (req, res) => {
       transportId,
       deliveryLocation,
       gstDetails,
-      balanceSnapshot: incomingBalanceSnapshot,
       voucherType = existingVoucher.voucherType || 'sale',
       purchaseType = existingVoucher.purchaseType
     } = req.body;
@@ -918,6 +876,7 @@ router.put('/:id', async (req, res) => {
       throw badRequest('Invalid voucherType. Must be sale or purchase');
     }
     assertPurchaseType(purchaseType);
+    assertSettlementRate(paymentType, goldRate, silverRate);
     if (!isSettlementType && (!Array.isArray(items) || items.length === 0)) {
       throw badRequest('At least one item is required for this payment type');
     }
@@ -1085,60 +1044,12 @@ router.put('/:id', async (req, res) => {
     }
 
     const stockAdjusted = hasNonZeroStockAdjustment(stockAdjustment);
-    const oldCreditAmount = toNumber(targetLedger.balances.creditBalance);
-    const oldCashAmount = toNumber(targetLedger.balances.cashBalance);
-    const oldGoldFineWeight = toNumber(targetLedger.balances.goldFineWeight);
-    const oldSilverFineWeight = toNumber(targetLedger.balances.silverFineWeight);
-
-    let currentGoldFineWeight = oldGoldFineWeight;
-    let currentSilverFineWeight = oldSilverFineWeight;
-
-    if (paymentType === 'credit') {
-      if (voucherType === 'purchase') {
-        cleanedItems.forEach((item) => {
-          if (item.metalType === 'gold') currentGoldFineWeight -= toNumber(item.fineWeight);
-          else if (item.metalType === 'silver') currentSilverFineWeight -= toNumber(item.fineWeight);
-        });
-      } else {
-        currentGoldFineWeight += stockAdjustment.gold;
-        currentSilverFineWeight += stockAdjustment.silver;
-      }
-    } else if (paymentType === 'add_gold') {
-      currentGoldFineWeight -= toNumber(cashReceived);
-    } else if (paymentType === 'add_silver') {
-      currentSilverFineWeight -= toNumber(cashReceived);
-    } else if (paymentType === 'money_to_gold') {
-      currentGoldFineWeight -= (toNumber(cashReceived) / (toNumber(goldRate) || 1));
-    } else if (paymentType === 'money_to_silver') {
-      currentSilverFineWeight -= (toNumber(cashReceived) / (toNumber(silverRate) || 1));
-    }
-
-    const fallbackCurrentAmount = paymentType === 'credit'
-      ? (voucherType === 'purchase'
-        ? (oldCreditAmount + oldCashAmount - total)
-        : (oldCreditAmount + oldCashAmount + total))
-      : paymentType === 'cash'
-        ? (voucherType === 'purchase'
-          ? (oldCashAmount - (toNumber(total) - toNumber(cashReceived)))
-          : (oldCashAmount + getCashBalanceDelta(total, cashReceived)))
-        : currentBalance.amount;
-
-    const fallbackBalanceSnapshot = {
-      oldBalance: {
-        creditAmount: oldCreditAmount,
-        cashAmount: oldCashAmount,
-        totalAmount: oldCreditAmount + oldCashAmount,
-        goldFineWeight: oldGoldFineWeight,
-        silverFineWeight: oldSilverFineWeight
-      },
-      currentBalance: {
-        amount: fallbackCurrentAmount,
-        goldFineWeight: currentGoldFineWeight,
-        silverFineWeight: currentSilverFineWeight
-      }
-    };
-
-    const balanceSnapshot = sanitizeBalanceSnapshot(incomingBalanceSnapshot, fallbackBalanceSnapshot);
+    // Printed old/current balance is always worked out here, never taken from the client
+    const nextBalances = applyVoucherToBalances(targetLedger.balances, {
+      paymentType, voucherType, invoiceType, items: cleanedItems,
+      total, cashReceived, goldRate, silverRate
+    }, targetLedger.ledgerType);
+    const balanceSnapshot = snapshotFromBalances(targetLedger.balances, nextBalances);
 
     const previousLedgerState = {
       goldFineWeight: toNumber(targetLedger.balances.goldFineWeight),
@@ -1281,10 +1192,13 @@ router.patch('/:id', async (req, res) => {
 
     // use current user's reversal window
     const currentUser = await User.findById(req.userId).select('reversalSettings');
-    const canReverse = canReverseForVoucher(voucher, currentUser);
+    // Cancelling without reversing would leave the amount in the balance with no entry to explain it
+    if (!canReverseForVoucher(voucher, currentUser)) {
+      throw lockedEntryError(currentUser, 'cancelled');
+    }
 
     const ledger = await Ledger.findById(voucher.ledgerId).session(session);
-    if (ledger && canReverse) {
+    if (ledger) {
       await reverseVoucherEffects(voucher, ledger, { session, restoreStock: true, markRestored: true });
 
       const remainingVouchers = await Voucher.countDocuments({
@@ -1307,17 +1221,9 @@ router.patch('/:id', async (req, res) => {
       await session.commitTransaction();
     }
 
-    const windowHours = currentUser?.reversalSettings
-      ? (currentUser.reversalSettings.enabled === false
-          ? 0
-          : (currentUser.reversalSettings.windowHours ?? getReversalWindowHours()))
-      : getReversalWindowHours();
-
     return res.json({
       success: true,
-      message: canReverse
-        ? 'Voucher cancelled successfully'
-        : `Voucher cancelled without reversal (older than ${windowHours} hours)`,
+      message: 'Voucher cancelled successfully',
       voucher
     });
   } catch (error) {
@@ -1353,10 +1259,14 @@ router.delete('/:id', async (req, res) => {
 
     const currentUser = await User.findById(req.userId).select('reversalSettings');
     const canReverse = canReverseForVoucher(voucher, currentUser);
+    // Deleting without reversing would leave the amount in the balance with no entry to explain it
+    if (!canReverse && voucher.status !== 'cancelled') {
+      throw lockedEntryError(currentUser, 'deleted');
+    }
 
     const ledger = await Ledger.findById(voucher.ledgerId).session(session);
     if (ledger) {
-      if (canReverse && voucher.status !== 'cancelled') {
+      if (voucher.status !== 'cancelled') {
         await reverseVoucherEffects(voucher, ledger, { session, restoreStock: true, markRestored: false });
       } else if (canReverse && !voucher.stockRestored) {
         const adjustment = getVoucherStockAdjustment(voucher);
@@ -1388,17 +1298,9 @@ router.delete('/:id', async (req, res) => {
       await session.commitTransaction();
     }
 
-    const windowHours = currentUser?.reversalSettings
-      ? (currentUser.reversalSettings.enabled === false
-          ? 0
-          : (currentUser.reversalSettings.windowHours ?? getReversalWindowHours()))
-      : getReversalWindowHours();
-
     return res.json({
       success: true,
-      message: canReverse
-        ? 'Voucher deleted successfully'
-        : `Voucher deleted without reversal (older than ${windowHours} hours)`
+      message: 'Voucher deleted successfully'
     });
   } catch (error) {
     if (session?.inTransaction()) {
